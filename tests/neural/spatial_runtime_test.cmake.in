@@ -1,0 +1,31 @@
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/neural-test-cache")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/neural-test-cache"
+        "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+        "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/ns-neural-test"
+        "@NS_BUNDLED_MODEL_DIR@"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "neural runtime failed (${result})\nstdout:\n${output}\nstderr:\n${error}")
+endif()
+
+foreach(expected
+        "runtime=MIGraphX"
+        "persistent=yes"
+        "warmup=complete"
+        "compiled_cache=hit"
+        "bundled_model_changed_output=yes"
+        "python_runtime=no"
+        "failure_fallback=copy")
+    string(FIND "${output}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "missing '${expected}' in output:\n${output}")
+    endif()
+endforeach()
+
+message(STATUS "${output}")

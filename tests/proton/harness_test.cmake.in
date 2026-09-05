@@ -1,0 +1,50 @@
+set(root "@CMAKE_BINARY_DIR@/proton-harness-test")
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${root}/home")
+foreach(api IN ITEMS dx11 dx12)
+    if(api STREQUAL "dx11")
+        set(translator "DXVK")
+    else()
+        set(translator "VKD3D-Proton")
+    endif()
+    file(WRITE "${root}/${api}.sh"
+        "#!/bin/sh\ncase \"$VK_INSTANCE_LAYERS\" in *VK_LAYER_NEUROSHADE*) echo 'translator=${translator} gpu=Test GPU present_processing=active backend=shader'; exit 0;; *) exit 90;; esac\n")
+    execute_process(COMMAND chmod 755 "${root}/${api}.sh")
+endforeach()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "HOME=${root}/home"
+        "NEUROSHADE_RUN=@CMAKE_BINARY_DIR@/bin/neuroshade-run"
+        "PROTON_VERSION=test-proton"
+        "DXVK_VERSION=test-dxvk"
+        "VKD3D_PROTON_VERSION=test-vkd3d"
+        "NEUROSHADE_EXPECTED_GPU=Test GPU"
+        /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/qualify-proton.sh"
+        --dx11-launcher "${root}/dx11.sh"
+        --dx12-launcher "${root}/dx12.sh"
+        --output "${root}/qualification.json"
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0 OR NOT output MATCHES "\"qualified\":\"yes\"" OR
+   NOT output MATCHES "test-dxvk" OR NOT output MATCHES "test-vkd3d")
+    message(FATAL_ERROR "Proton qualification harness failed: ${output} ${error}")
+endif()
+
+file(WRITE "${root}/no-evidence.sh" "#!/bin/sh\nexit 0\n")
+execute_process(COMMAND chmod 755 "${root}/no-evidence.sh")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "HOME=${root}/home"
+        "NEUROSHADE_RUN=@CMAKE_BINARY_DIR@/bin/neuroshade-run"
+        /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/qualify-proton.sh"
+        --dx11-launcher "${root}/no-evidence.sh"
+        --dx12-launcher "${root}/no-evidence.sh"
+        --output "${root}/no-evidence.json"
+    RESULT_VARIABLE no_evidence_result OUTPUT_VARIABLE no_evidence_output ERROR_VARIABLE no_evidence_error)
+if(no_evidence_result EQUAL 0 OR NOT no_evidence_output MATCHES "\"qualified\":\"no\"" OR
+   NOT no_evidence_output MATCHES "\"dx11_evidence\":\"no\"" OR
+   NOT no_evidence_output MATCHES "\"dx12_evidence\":\"no\"" OR
+   NOT no_evidence_output MATCHES "\"dx11_layer_evidence\":\"no\"")
+    message(FATAL_ERROR "translator evidence gate failed: ${no_evidence_output} ${no_evidence_error}")
+endif()
+message(STATUS "proton.harness_contract: PASS evidence_required=yes (synthetic; not a DX qualification)")

@@ -1,0 +1,12 @@
+schema = 1
+id = "org.neuroshade.color_adjust"
+name = "Color Adjustment"
+version = "1.0.0"
+api = 1
+
+[[passes]]
+id = "color_adjust"
+backend = "shader"
+shader = "color_adjust.spv"
+inputs = ["Color.Final"]
+output = "Output.Color"

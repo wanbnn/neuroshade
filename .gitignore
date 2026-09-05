@@ -1,0 +1,13 @@
+/build/
+/.cache/
+compile_commands.json
+*.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.env
+.env.*
+!.env.example
+.DS_Store
+.idea/
+.vscode/

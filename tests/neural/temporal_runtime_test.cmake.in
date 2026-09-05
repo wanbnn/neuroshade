@@ -1,0 +1,37 @@
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/temporal-test-cache")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/temporal-test-cache"
+        "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+        "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/ns-temporal-test"
+        "@NS_BUNDLED_TEMPORAL_MODEL_DIR@"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "temporal runtime failed (${result})\nstdout:\n${output}\nstderr:\n${error}")
+endif()
+
+foreach(expected
+        "runtime=MIGraphX"
+        "persistent=tensors_and_history"
+        "warmup=complete"
+        "compiled_cache=hit"
+        "history_ring=4_slots"
+        "first_frame=spatial"
+        "step_1_uses_history=yes"
+        "differs_from_step_1=yes"
+        "reset_replays_first_frame=yes"
+        "invalidate_replays_first_frame=yes"
+        "python_runtime=no"
+        "failure_fallback=copy"
+        "pass_neural.temporal.first_frame_eval=")
+    string(FIND "${output}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "missing '${expected}' in output:\n${output}")
+    endif()
+endforeach()
+
+message(STATUS "${output}")

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "game": {"executable": "ns-testbed"},
+  "pipeline": [
+    {"plugin": "org.neuroshade.sharpen", "enabled": true, "strength": 0.8},
+    {"plugin": "org.neuroshade.copy", "enabled": false, "strength": 1.0},
+    {"plugin": "org.neuroshade.color_adjust", "enabled": true, "strength": 1.0}
+  ]
+}

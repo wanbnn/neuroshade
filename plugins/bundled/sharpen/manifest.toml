@@ -1,0 +1,12 @@
+schema = 1
+id = "org.neuroshade.sharpen"
+name = "Sharpen"
+version = "1.0.0"
+api = 1
+
+[[passes]]
+id = "sharpen"
+backend = "shader"
+shader = "sharpen.spv"
+inputs = ["Color.Final"]
+output = "Output.Color"

@@ -1,0 +1,405 @@
+#!/bin/sh
+set -eu
+
+version="@PROJECT_VERSION@"
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+prefix=${NEUROSHADE_ROOT:-$(dirname -- "$script_dir")}
+config_home=${XDG_CONFIG_HOME:-"${HOME:?HOME is required}/.config"}/neuroshade
+state_home=${XDG_STATE_HOME:-"${HOME:?HOME is required}/.local/state"}/neuroshade
+data_home=${XDG_DATA_HOME:-"${HOME:?HOME is required}/.local/share"}/neuroshade
+cache_home=${XDG_CACHE_HOME:-"${HOME:?HOME is required}/.cache"}/neuroshade
+games_dir="$config_home/games"
+user_plugins="$data_home/plugins"
+user_models="$data_home/models"
+
+die() { printf '%s\n' "neuroshade: $*" >&2; exit 64; }
+safe_id() { printf '%s' "$1" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9._-]*$' || die "invalid package id: $1"; }
+json_escape() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g'; }
+hash_text() { printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+
+rocm_gpu_record() {
+    awk '
+        /^[[:space:]]*Name:/ {
+            value = $0
+            sub(/^.*Name:[[:space:]]*/, "", value)
+            sub(/[[:space:]].*$/, "", value)
+            arch = value ~ /^gfx[0-9a-z]+$/ ? value : ""
+        }
+        /^[[:space:]]*Marketing Name:/ && arch != "" {
+            value = $0
+            sub(/^.*Marketing Name:[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            print arch "\t" value
+            exit
+        }
+    '
+}
+
+ensure_dirs() {
+    mkdir -p "$config_home" "$state_home" "$data_home" "$cache_home" \
+             "$games_dir" "$user_plugins" "$user_models"
+}
+
+value_from_json() {
+    key=$1
+    file=$2
+    sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$file" | head -n 1
+}
+
+package_id() {
+    source_dir=$1
+    kind=$2
+    if [ "$kind" = plugin ]; then
+        file="$source_dir/manifest.toml"
+        [ -f "$file" ] || die "plugin is missing manifest.toml"
+        sed -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n 1
+    else
+        file="$source_dir/manifest.json"
+        [ -f "$file" ] || die "model is missing manifest.json"
+        case "$source_dir" in *.nsmodel) ;; *) die "model directory must use the .nsmodel extension";; esac
+        for required in model.onnx signature.json metadata.json preview.webp; do
+            [ -s "$source_dir/$required" ] || die "model is missing or has empty $required"
+        done
+        value_from_json id "$file"
+    fi
+}
+
+install_package() {
+    kind=$1
+    source_dir=$2
+    trust=${3:-}
+    [ -d "$source_dir" ] || die "$kind source is not a directory: $source_dir"
+    case "$source_dir" in *'/../'*|../*|*/..) die "path traversal is not allowed";; esac
+    if find "$source_dir" -type l -print -quit | grep -q .; then
+        die "$kind packages may not contain symbolic links"
+    fi
+    file_count=$(find "$source_dir" -type f -print | wc -l)
+    [ "$file_count" -le 10000 ] || die "$kind package contains too many files"
+    byte_count=$(find "$source_dir" -type f -printf '%s\n' | awk '{total += $1} END {printf "%.0f", total}')
+    max_bytes=${NEUROSHADE_MAX_PACKAGE_BYTES:-8589934592}
+    printf '%s' "$max_bytes" | grep -Eq '^[0-9]+$' || die "NEUROSHADE_MAX_PACKAGE_BYTES must be an integer"
+    [ "$byte_count" -le "$max_bytes" ] || die "$kind package exceeds the configured size limit"
+    inspector="$prefix/libexec/neuroshade/ns-package-inspect"
+    unsafe_plugin=no
+    if [ "$kind" = plugin ] && grep -Eq 'backend[[:space:]]*=[[:space:]]*"(hip|native)"' "$source_dir/manifest.toml"; then
+        unsafe_plugin=yes
+    fi
+    if [ -x "$inspector" ] && { [ "$kind" = model ] || [ "$unsafe_plugin" = no ]; }; then
+        "$inspector" "$kind" "$source_dir" >/dev/null || die "$kind package validation failed"
+    fi
+    id=$(package_id "$source_dir" "$kind")
+    [ -n "$id" ] || die "$kind package has no id"
+    safe_id "$id"
+    if [ "$unsafe_plugin" = yes ]; then
+        [ "$trust" = "--trust-unsafe" ] || die "HIP/native plugins are trusted code; repeat with --trust-unsafe"
+    fi
+    root=$user_plugins
+    [ "$kind" = model ] && root=$user_models
+    target="$root/$id"
+    [ "$kind" = model ] && target="$root/$id.nsmodel"
+    [ ! -e "$target" ] || die "$kind is already installed: $id"
+    temporary=$(mktemp -d "$root/.$id.tmp.XXXXXX")
+    trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+    cp -a "$source_dir/." "$temporary/"
+    (cd "$temporary" && find . -type f ! -name .neuroshade-hashes.sha256 -print0 |
+        sort -z | xargs -0 sha256sum > .neuroshade-hashes.sha256)
+    mv "$temporary" "$target"
+    trap - EXIT HUP INT TERM
+    printf '%s\n' "$kind installed: $id"
+}
+
+remove_package() {
+    kind=$1
+    id=$2
+    safe_id "$id"
+    root=$user_plugins
+    [ "$kind" = model ] && root=$user_models
+    target="$root/$id"
+    [ "$kind" = model ] && target="$root/$id.nsmodel"
+    [ -d "$target" ] && [ -r "$target/.neuroshade-hashes.sha256" ] ||
+        die "$kind is not user-installed: $id"
+    rm -rf -- "$target"
+    printf '%s\n' "$kind removed: $id"
+}
+
+list_packages() {
+    kind=$1
+    installed_root="$prefix/share/neuroshade/${kind}s"
+    user_root=$user_plugins
+    suffix=manifest.toml
+    [ "$kind" = model ] && { user_root=$user_models; suffix=manifest.json; }
+    for origin_root in "bundled:$installed_root" "user:$user_root"; do
+        origin=${origin_root%%:*}
+        root=${origin_root#*:}
+        [ -d "$root" ] || continue
+        find "$root" -mindepth 2 -maxdepth 2 -name "$suffix" -print 2>/dev/null | sort |
+        while IFS= read -r file; do
+            dir=${file%/*}
+            if [ "$origin" = user ]; then
+                [ -r "$dir/.neuroshade-hashes.sha256" ] || continue
+            else
+                [ ! -e "$dir/.neuroshade-hashes.sha256" ] || continue
+            fi
+            id=$(package_id "$dir" "$kind")
+            [ -n "$id" ] && printf '%s\t%s\t%s\n' "$kind" "$id" "$origin"
+        done
+    done
+}
+
+verify_packages() {
+    failed=0
+    bundled_inventory="$prefix/share/neuroshade/plugin-hashes.sha256"
+    if [ -r "$bundled_inventory" ]; then
+        if (cd "$prefix/share/neuroshade" && sha256sum -c plugin-hashes.sha256 >/dev/null); then
+            printf 'verified\tbundled-plugin-assets\n'
+        else
+            printf 'modified\tbundled-plugin-assets\n' >&2
+            failed=1
+        fi
+    fi
+    inventory_list=$(mktemp "${TMPDIR:-/tmp}/neuroshade-verify.XXXXXX")
+    trap 'rm -f -- "$inventory_list"' EXIT HUP INT TERM
+    : > "$inventory_list"
+    for root in "$user_plugins" "$user_models"; do
+        [ -d "$root" ] || continue
+        find "$root" -mindepth 2 -maxdepth 2 -name .neuroshade-hashes.sha256 -print >> "$inventory_list"
+    done
+    while IFS= read -r inventory; do
+        package=${inventory%/*}
+        if (cd "$package" && sha256sum -c .neuroshade-hashes.sha256 >/dev/null); then
+            printf 'verified\t%s\n' "${package##*/}"
+        else
+            printf 'modified\t%s\n' "${package##*/}" >&2
+            failed=1
+        fi
+    done < "$inventory_list"
+    rm -f -- "$inventory_list"
+    trap - EXIT HUP INT TERM
+    return "$failed"
+}
+
+doctor() {
+    option=${1:-}
+    json=no
+    deep=no
+    [ "$option" = --json ] && json=yes
+    [ "$option" = --deep ] && deep=yes
+    manifest="$prefix/share/vulkan/explicit_layer.d/VkLayer_neuroshade.json"
+    layer="$prefix/lib/neuroshade/libVkLayer_neuroshade.so"
+    vulkan=no; hip=no; migraphx=no; gfx=unknown; gpu=unknown; rocm=unknown
+    command -v vulkaninfo >/dev/null 2>&1 && vulkan=yes
+    if command -v rocminfo >/dev/null 2>&1; then
+        hip=yes
+        rocminfo_output=$(rocminfo 2>/dev/null || true)
+        gpu_record=$(printf '%s\n' "$rocminfo_output" | rocm_gpu_record)
+        gfx=$(printf '%s\n' "$gpu_record" | cut -f1)
+        gpu=$(printf '%s\n' "$gpu_record" | cut -f2-)
+        [ -n "$gfx" ] || gfx=unknown
+        [ -n "$gpu" ] || gpu=unknown
+    fi
+    if command -v hipconfig >/dev/null 2>&1; then
+        rocm=$(hipconfig --version 2>/dev/null | head -n 1 || true)
+        [ -n "$rocm" ] || rocm=unknown
+    fi
+    { [ -e /opt/rocm/lib/libmigraphx.so ] || find "$prefix/lib" -name 'libmigraphx.so*' -print -quit 2>/dev/null | grep -q .; } && migraphx=yes
+    if [ "$migraphx" = no ] && [ -x "$prefix/bin/ns-neural-test" ] && command -v ldd >/dev/null 2>&1; then
+        ldd "$prefix/bin/ns-neural-test" 2>/dev/null | grep -q 'not found' || migraphx=yes
+    fi
+    class=unsupported
+    [ "$vulkan" = yes ] && class=shader-only
+    [ "$vulkan" = yes ] && [ "$hip" = yes ] && class=hip-fallback
+    [ "$vulkan" = yes ] && [ "$hip" = yes ] && [ "$migraphx" = yes ] && class=neural-ready
+    grade=unsupported
+    [ "$class" = shader-only ] && grade=C
+    [ "$class" = hip-fallback ] && grade=B
+    [ "$class" = neural-ready ] && grade=A
+    layer_ok=no; manifest_ok=no
+    [ -r "$layer" ] && layer_ok=yes
+    [ -r "$manifest" ] && manifest_ok=yes
+    interop=not-run
+    interop_mode=unknown
+    neural=not-run
+    self_test_log="$state_home/doctor-self-test-$$.log"
+    if [ "$deep" = yes ]; then
+        interop=unavailable
+        neural=unavailable
+        if [ -x "$prefix/bin/ns-interop-test" ]; then
+            if timeout 120 "$prefix/bin/ns-interop-test" >"$self_test_log" 2>&1; then
+                interop=pass
+                interop_mode=$(sed -n 's/.*Interop: \([^;]*\).*/\1/p' "$self_test_log" | head -n 1)
+                [ -n "$interop_mode" ] || interop_mode=pass
+            else
+                interop=fail
+            fi
+        fi
+        spatial_model="$prefix/share/neuroshade/models/spatial_gain.nsmodel"
+        if [ -x "$prefix/bin/ns-neural-test" ] && [ -d "$spatial_model" ]; then
+            if timeout 120 "$prefix/bin/ns-neural-test" "$spatial_model" >>"$self_test_log" 2>&1; then
+                neural=pass
+            else
+                neural=fail
+            fi
+        fi
+    fi
+    if [ "$json" = yes ]; then
+        printf '{"schema_version":1,"version":"%s","compatibility_class":"%s","compatibility_grade":"%s","gpu":"%s","gfx":"%s","rocm":"%s","vulkan":"%s","hip":"%s","migraphx":"%s","layer":"%s","manifest":"%s","interop_self_test":"%s","interop_mode":"%s","neural_self_test":"%s"}\n' \
+            "$version" "$class" "$grade" "$(json_escape "$gpu")" "$gfx" "$rocm" "$vulkan" "$hip" "$migraphx" "$layer_ok" "$manifest_ok" "$interop" "$interop_mode" "$neural"
+    else
+        printf 'NeuroShade doctor %s\n' "$version"
+        printf 'compatibility_class=%s\nCompatibility=%s\nGPU=%s\ngfx=%s\nROCm=%s\nVulkan=%s\nHIP=%s\nMIGraphX=%s\nlayer=%s\nmanifest=%s\n' \
+            "$class" "$grade" "$gpu" "$gfx" "$rocm" "$vulkan" "$hip" "$migraphx" "$layer_ok" "$manifest_ok"
+        printf 'config=%s\nlogs=%s\ncache=%s\n' "$config_home" "$state_home" "$cache_home"
+        printf 'interop_self_test=%s\ninterop_mode=%s\nneural_self_test=%s\n' "$interop" "$interop_mode" "$neural"
+        [ "$deep" = no ] || printf 'self_test_log=%s\n' "$self_test_log"
+    fi
+    [ "$layer_ok" = yes ] && [ "$manifest_ok" = yes ] &&
+        { [ "$deep" = no ] || { [ "$interop" = pass ] && [ "$neural" = pass ]; }; }
+}
+
+game_add() {
+    [ "$#" -ge 1 ] || die "usage: neuroshade game add <executable> [profile]"
+    executable=$1
+    profile=${2:-}
+    [ -z "$profile" ] || [ -r "$profile" ] || die "profile is not readable: $profile"
+    if printf '%s%s' "$executable" "$profile" | LC_ALL=C grep -q '[[:cntrl:]]'; then
+        die "control characters are not allowed"
+    fi
+    case "$executable$profile" in *\\*|*\"*) die "backslashes and quotes are not supported in profile paths";; esac
+    key=$(hash_text "$executable")
+    target="$games_dir/$key.json"
+    temporary=$(mktemp "$games_dir/.$key.XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    printf '{"schema_version":1,"executable":"%s","profile":"%s","launch_option":"neuroshade-run %%command%%"}\n' \
+        "$(json_escape "$executable")" "$(json_escape "$profile")" > "$temporary"
+    mv "$temporary" "$target"
+    trap - EXIT HUP INT TERM
+    printf 'game added: %s\nlaunch option: neuroshade-run %%command%%\n' "$executable"
+}
+
+game_list() {
+    find "$games_dir" -maxdepth 1 -name '*.json' -type f -print 2>/dev/null | sort |
+    while IFS= read -r file; do
+        printf '%s\t%s\n' "$(value_from_json executable "$file")" "$(value_from_json profile "$file")"
+    done
+}
+
+game_show() {
+    [ "$#" -eq 1 ] || die "usage: neuroshade profile show <executable>"
+    key=$(hash_text "$1")
+    record="$games_dir/$key.json"
+    [ -r "$record" ] || die "game is not registered: $1"
+    cat "$record"
+    profile=$(value_from_json profile "$record")
+    if [ -n "$profile" ] && [ -r "$profile" ]; then
+        printf '%s\n' "--- profile ---"
+        cat "$profile"
+    fi
+}
+
+model_import() {
+    [ "$#" -ge 3 ] || die "usage: neuroshade model import <model.pth> --adapter <adapter.py>"
+    pth=$1
+    shift
+    [ "$1" = --adapter ] || die "model import requires --adapter"
+    adapter=$2
+    [ -r "$pth" ] || die "unable to read .pth: $pth"
+    [ -r "$adapter" ] || die "unable to read adapter: $adapter"
+    python_command=${NEUROSHADE_PYTHON:-python3}
+    command -v "$python_command" >/dev/null 2>&1 || die "Python is required by the isolated importer"
+    importer="$prefix/libexec/neuroshade/nsmodel-importer.py"
+    [ -r "$importer" ] || die "model importer is not installed"
+    import_work=$(mktemp -d "$user_models/.import.XXXXXX")
+    temporary="$import_work/package.nsmodel"
+    trap 'rm -rf -- "$import_work"' EXIT HUP INT TERM
+    NEUROSHADE_NO_INSTALL=1 "$python_command" "$importer" import "$pth" \
+        --adapter "$adapter" --output "$temporary"
+    id=$(package_id "$temporary" model)
+    [ -n "$id" ] || die "imported model has no id"
+    safe_id "$id"
+    target="$user_models/$id.nsmodel"
+    [ ! -e "$target" ] || die "model is already installed: $id"
+    (cd "$temporary" && find . -type f ! -name .neuroshade-hashes.sha256 -print0 |
+        sort -z | xargs -0 sha256sum > .neuroshade-hashes.sha256)
+    mv "$temporary" "$target"
+    rmdir "$import_work"
+    trap - EXIT HUP INT TERM
+    printf '%s\n' "model installed: $id"
+}
+
+cache_clear() {
+    case "$cache_home" in /|""|"$HOME") die "unsafe cache directory";; esac
+    find "$cache_home" -mindepth 1 -delete
+    printf '%s\n' "cache cleared: $cache_home"
+}
+
+diagnostic_export() {
+    [ "$#" -eq 1 ] || die "usage: neuroshade diagnostic export <archive.tar.gz>"
+    archive=$1
+    case "$archive" in *.tar.gz) ;; *) die "diagnostic archive must end in .tar.gz";; esac
+    work=$(mktemp -d "${TMPDIR:-/tmp}/neuroshade-diagnostic.XXXXXX")
+    trap 'rm -rf -- "$work"' EXIT HUP INT TERM
+    doctor --json > "$work/system.json" || true
+    game_list > "$work/profiles.txt"
+    list_packages plugin > "$work/plugins.txt"
+    list_packages model > "$work/models.txt"
+    latest_log=$(find "$state_home" -maxdepth 1 -type f -name 'session-*.log' -print 2>/dev/null | sort | tail -n 1)
+    [ -z "$latest_log" ] || cp "$latest_log" "$work/session.log"
+    tar --sort=name -C "$work" -czf "$archive" .
+    rm -rf -- "$work"
+    trap - EXIT HUP INT TERM
+    printf '%s\n' "diagnostic exported: $archive (no frame data)"
+}
+
+show_help() {
+    cat <<EOF
+NeuroShade $version
+usage: neuroshade <command>
+
+  doctor [--json|--deep]          inspect or exercise runtime compatibility
+  launch <command...>             run through the explicit Vulkan layer
+  game add <executable> [profile] register a game
+  game list                       list registered games
+  profile list|show <executable>  inspect persistent profiles
+  plugin list|install|remove      manage plugin packages
+  model list|install|import|remove manage model packages
+  cache clear                     remove compiled-model caches
+  diagnostic export <archive>     export diagnostics without frame data
+  verify                          verify user package hashes
+  logs                            print the user log directory
+  frontend                        launch the desktop frontend
+EOF
+}
+
+ensure_dirs
+command=${1:-help}
+[ "$#" -eq 0 ] || shift
+case "$command" in
+    doctor) doctor "${1:-}";;
+    launch) [ "$#" -gt 0 ] || die "usage: neuroshade launch <command...>"; exec "$script_dir/neuroshade-run" "$@";;
+    game)
+        action=${1:-}; [ "$#" -eq 0 ] || shift
+        case "$action" in add) game_add "$@";; list) game_list;; *) die "usage: neuroshade game add|list";; esac;;
+    plugin|model)
+        kind=$command; action=${1:-}; [ "$#" -eq 0 ] || shift
+        case "$action" in
+            list) list_packages "$kind";;
+            install) [ "$#" -ge 1 ] || die "missing package directory"; install_package "$kind" "$1" "${2:-}";;
+            import) [ "$kind" = model ] || die "only models can be imported"; model_import "$@";;
+            remove) [ "$#" -eq 1 ] || die "missing package id"; remove_package "$kind" "$1";;
+            *) die "usage: neuroshade $kind list|install|remove";;
+        esac;;
+    profile)
+        action=${1:-}; [ "$#" -eq 0 ] || shift
+        case "$action" in list) game_list;; show) game_show "$@";; *) die "usage: neuroshade profile list|show";; esac;;
+    cache) [ "${1:-}" = clear ] || die "usage: neuroshade cache clear"; cache_clear;;
+    diagnostic)
+        action=${1:-}; [ "$#" -eq 0 ] || shift
+        [ "$action" = export ] || die "usage: neuroshade diagnostic export <archive.tar.gz>"
+        diagnostic_export "$@";;
+    verify) verify_packages;;
+    logs) printf '%s\n' "$state_home";;
+    frontend) exec "$script_dir/neuroshade-desktop";;
+    help|-h|--help) show_help;;
+    --version) printf 'neuroshade %s\n' "$version";;
+    *) die "unknown command: $command";;
+esac

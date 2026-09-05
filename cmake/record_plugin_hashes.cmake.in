@@ -1,0 +1,12 @@
+set(neuroshade_root "$ENV{DESTDIR}${CMAKE_INSTALL_PREFIX}/@CMAKE_INSTALL_DATADIR@/neuroshade")
+file(GLOB_RECURSE plugin_files LIST_DIRECTORIES false
+    "${neuroshade_root}/plugins/*"
+    "${neuroshade_root}/shaders/*")
+list(SORT plugin_files)
+set(contents "# SHA-256 inventory for installed bundled plugin assets\n")
+foreach(file IN LISTS plugin_files)
+    file(SHA256 "${file}" digest)
+    file(RELATIVE_PATH relative "${neuroshade_root}" "${file}")
+    string(APPEND contents "${digest}  ${relative}\n")
+endforeach()
+file(WRITE "${neuroshade_root}/plugin-hashes.sha256" "${contents}")

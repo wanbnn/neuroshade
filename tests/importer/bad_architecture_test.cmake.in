@@ -1,0 +1,42 @@
+# Build a `.pth` whose state_dict has keys the spatial-gain adapter does
+# not declare, then ensure the importer fails with `adapter_error`.
+
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/bad-arch-fixture")
+
+execute_process(
+    COMMAND "@Python3_EXECUTABLE@" "-c"
+        "import torch, sys, pathlib; \
+        pathlib.Path('@CMAKE_BINARY_DIR@/bad-arch-fixture').mkdir(parents=True, exist_ok=True); \
+        torch.save({'unexpected_weight': torch.zeros(1)}, \
+                   '@CMAKE_BINARY_DIR@/bad-arch-fixture/state.pth')"
+    RESULT_VARIABLE seed_result
+    OUTPUT_VARIABLE seed_output
+    ERROR_VARIABLE seed_error)
+
+if(NOT seed_result EQUAL 0)
+    message(FATAL_ERROR "could not build bad-architecture fixture (${seed_result})\n${seed_output}\n${seed_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "NEUROSHADE_NO_INSTALL=1"
+        "@Python3_EXECUTABLE@"
+            "@CMAKE_CURRENT_SOURCE_DIR@/tools/nsmodel/importer.py" import
+            "@CMAKE_BINARY_DIR@/bad-arch-fixture/state.pth"
+            --adapter "@NS_REFERENCE_ADAPTER@"
+            --output "@CMAKE_BINARY_DIR@/bad-arch-fixture/bad.nsmodel"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(result EQUAL 0)
+    message(FATAL_ERROR "expected importer failure on bad architecture\noutput:\n${output}\nerror:\n${error}")
+endif()
+
+string(FIND "${output}" "status=fail" found_status)
+string(FIND "${output}" "reason=adapter_error" found_reason)
+if(found_status EQUAL -1 OR found_reason EQUAL -1)
+    message(FATAL_ERROR "missing expected failure markers\noutput:\n${output}\nerror:\n${error}")
+endif()
+
+message(STATUS "importer.bad_architecture: PASS")

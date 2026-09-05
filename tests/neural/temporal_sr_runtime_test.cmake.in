@@ -1,0 +1,30 @@
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/temporal-sr-test-cache")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/temporal-sr-test-cache"
+        "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+        "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/ns-temporal-sr-test"
+        "@NS_BUNDLED_TEMPORAL_SR_MODEL_DIR@"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "temporal SR runtime failed (${result})\nstdout:\n${output}\nstderr:\n${error}")
+endif()
+
+foreach(expected
+        "runtime=MIGraphX"
+        "input_extent=32x32 output_extent=64x64 true_2x=yes"
+        "motion_propagates_to_output=yes"
+        "missing_motion_policy=spatial selected=yes pass_active=yes"
+        "warmup=complete active=yes"
+        "python_runtime=no")
+    string(FIND "${output}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "missing '${expected}' in output:\n${output}")
+    endif()
+endforeach()
+
+message(STATUS "${output}")

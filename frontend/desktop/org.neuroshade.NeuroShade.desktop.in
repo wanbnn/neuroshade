@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NeuroShade
+Comment=Configure Vulkan post-processing and neural rendering
+Exec=neuroshade-desktop
+Icon=applications-graphics
+Terminal=false
+Categories=Game;Settings;
+StartupNotify=true

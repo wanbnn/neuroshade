@@ -1,0 +1,51 @@
+set(root "@CMAKE_BINARY_DIR@/session-log-test")
+set(home "${root}/home")
+set(state "${root}/state")
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${home}" "${state}")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "HOME=${home}"
+        "XDG_STATE_HOME=${state}"
+        "NEUROSHADE_ROOT=@CMAKE_BINARY_DIR@"
+        "NEUROSHADE_PROFILE=@CMAKE_SOURCE_DIR@/tests/data/m2-profile.json"
+        "@CMAKE_BINARY_DIR@/bin/neuroshade-run"
+        "@CMAKE_BINARY_DIR@/bin/ns-testbed" --frames 1
+    RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "logged layer launch failed: ${output} ${error}")
+endif()
+file(GLOB logs "${state}/neuroshade/session-*.log")
+list(LENGTH logs log_count)
+if(NOT log_count EQUAL 1)
+    message(FATAL_ERROR "expected one session log, found ${log_count}")
+endif()
+file(READ "${logs}" contents)
+if(NOT contents MATCHES "runtime_version=@PROJECT_VERSION@" OR
+   NOT contents MATCHES "activation=explicit_per_game" OR
+   NOT contents MATCHES "VK_LAYER_NEUROSHADE instance initialized" OR
+   NOT contents MATCHES "profile_load=pass schema=1 effects=3" OR
+   NOT contents MATCHES "pipeline_compile=pass mode=SHADER_ONLY passes=2 execution=pending-swapchain")
+    message(FATAL_ERROR "session log is incomplete:\n${contents}")
+endif()
+
+set(invalid_profile "${root}/invalid-profile.json")
+set(invalid_log "${root}/invalid-profile.log")
+file(WRITE "${invalid_profile}" "{\"schema_version\":99,\"game\":{\"executable\":\"bad\"}}\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "VK_LAYER_PATH=@NS_LAYER_MANIFEST_DIR@"
+        "VK_INSTANCE_LAYERS=VK_LAYER_NEUROSHADE"
+        "NEUROSHADE_PROFILE=${invalid_profile}"
+        "NEUROSHADE_LOG=${invalid_log}"
+        vulkaninfo --summary
+    RESULT_VARIABLE invalid_result OUTPUT_VARIABLE invalid_output ERROR_VARIABLE invalid_error)
+if(NOT invalid_result EQUAL 0)
+    message(FATAL_ERROR "invalid profile did not preserve pass-through: ${invalid_output} ${invalid_error}")
+endif()
+file(READ "${invalid_log}" invalid_contents)
+if(NOT invalid_contents MATCHES "profile_load=fail fallback=pass-through")
+    message(FATAL_ERROR "invalid profile fallback was not logged:\n${invalid_contents}")
+endif()
+message(STATUS "product.session_log: PASS wrapper_and_layer=yes profile_fallback=yes")

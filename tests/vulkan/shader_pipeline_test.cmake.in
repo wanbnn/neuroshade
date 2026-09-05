@@ -1,0 +1,55 @@
+function(run_effect output_variable effects)
+    execute_process(
+        COMMAND "@CMAKE_COMMAND@" -E env "NEUROSHADE_TEST_EFFECTS=${effects}"
+                "@CMAKE_BINARY_DIR@/bin/ns-testbed" --frames 4
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE output
+        ERROR_VARIABLE error)
+    if(NOT result EQUAL 0)
+        message(FATAL_ERROR "effect ${effects} failed: ${error}")
+    endif()
+    string(REGEX MATCH "checksum=0x[0-9a-f]+" checksum "${output}")
+    if(NOT checksum)
+        message(FATAL_ERROR "effect ${effects} emitted no checksum: ${output}")
+    endif()
+    set(${output_variable} "${checksum}" PARENT_SCOPE)
+endfunction()
+
+run_effect(copy_checksum "copy")
+run_effect(sharpen_checksum "sharpen")
+run_effect(forward_checksum "sharpen,color_adjust")
+run_effect(reverse_checksum "color_adjust,sharpen")
+
+if(NOT copy_checksum STREQUAL "checksum=0x3d23155e380d6325")
+    message(FATAL_ERROR "copy pass changed the reference frame: ${copy_checksum}")
+endif()
+if(sharpen_checksum STREQUAL copy_checksum)
+    message(FATAL_ERROR "sharpen did not modify the reference frame")
+endif()
+if(forward_checksum STREQUAL reverse_checksum)
+    message(FATAL_ERROR "effect ordering did not alter the execution result")
+endif()
+
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" -E env "NEUROSHADE_PROFILE=@CMAKE_SOURCE_DIR@/tests/data/m2-profile.json"
+            "@CMAKE_BINARY_DIR@/bin/ns-testbed" --frames 4
+    RESULT_VARIABLE profile_result
+    OUTPUT_VARIABLE profile_output
+    ERROR_VARIABLE profile_error)
+if(NOT profile_result EQUAL 0)
+    message(FATAL_ERROR "persisted profile execution failed: ${profile_error}")
+endif()
+string(REGEX MATCH "checksum=0x[0-9a-f]+" profile_checksum "${profile_output}")
+if(NOT profile_checksum STREQUAL forward_checksum)
+    message(FATAL_ERROR "persisted profile did not restore pipeline order: ${profile_checksum} vs ${forward_checksum}")
+endif()
+
+execute_process(
+    COMMAND "@CMAKE_COMMAND@" -E env NEUROSHADE_TEST_EFFECTS=sharpen NEUROSHADE_TEST_TOGGLE_FRAME=2
+            "@CMAKE_BINARY_DIR@/bin/ns-testbed" --frames 4
+    RESULT_VARIABLE toggle_result
+    OUTPUT_VARIABLE toggle_output
+    ERROR_VARIABLE toggle_error)
+if(NOT toggle_result EQUAL 0 OR NOT toggle_output MATCHES "effects=1")
+    message(FATAL_ERROR "live toggle test failed: ${toggle_output} ${toggle_error}")
+endif()

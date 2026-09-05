@@ -1,0 +1,16 @@
+execute_process(
+    COMMAND "@CMAKE_BINARY_DIR@/bin/neuroshade-run"
+            /bin/sh "@CMAKE_SOURCE_DIR@/tests/integration/wrapper_probe.sh"
+            "argument with spaces" "literal-*?"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error
+)
+
+if(NOT result EQUAL 23)
+    message(FATAL_ERROR "wrapper returned ${result}; stdout=${output}; stderr=${error}")
+endif()
+
+if(NOT output MATCHES "wrapper-probe: PASS")
+    message(FATAL_ERROR "wrapper did not preserve its contract; stdout=${output}; stderr=${error}")
+endif()

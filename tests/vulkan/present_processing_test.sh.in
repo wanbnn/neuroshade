@@ -1,0 +1,74 @@
+#!/bin/sh
+set -eu
+
+command -v vkcube >/dev/null 2>&1 || exit 77
+[ -n "${DISPLAY:-}" ] || exit 77
+
+log='@CMAKE_BINARY_DIR@/present-processing-test.log'
+output='@CMAKE_BINARY_DIR@/present-processing-test.out'
+: > "$log"
+: > "$output"
+child=
+test_home_atom='_NEUROSHADE_TEST_HOME_@PROJECT_VERSION@'
+cleanup() {
+    if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
+        kill "$child" 2>/dev/null || true
+        wait "$child" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT HUP INT TERM
+
+layer_path='@NS_LAYER_MANIFEST_DIR@'
+layers='VK_LAYER_NEUROSHADE'
+if [ -n '@NS_VALIDATION_LAYER_DIR@' ]; then
+    layer_path="$layer_path:@NS_VALIDATION_LAYER_DIR@"
+    layers="VK_LAYER_KHRONOS_validation:$layers"
+fi
+
+DRI_PRIME="${NEUROSHADE_TEST_DRI_PRIME:-}" \
+NEUROSHADE_ROOT='@CMAKE_BINARY_DIR@' \
+NEUROSHADE_PROFILE='@CMAKE_SOURCE_DIR@/tests/data/m2-profile.json' \
+NEUROSHADE_ENABLED=1 \
+NEUROSHADE_TEST_HOME_ATOM="$test_home_atom" \
+NEUROSHADE_LOG="$log" \
+VK_LAYER_PATH="$layer_path" \
+VK_INSTANCE_LAYERS="$layers" \
+timeout --kill-after=2s 20s vkcube --c 60000 --width 320 --height 240 --wsi xcb \
+    >"$output" 2>&1 &
+child=$!
+
+# Wait until the layer has processed at least one hidden frame before toggling.
+attempt=0
+while ! grep -q 'present_processing=active backend=shader extent=320x240 overlay=hidden' "$log"; do
+    attempt=$((attempt + 1))
+    if [ "$attempt" -ge 50 ] || ! kill -0 "$child" 2>/dev/null; then
+        cat "$log" >&2
+        cat "$output" >&2
+        exit 1
+    fi
+    sleep 0.1
+done
+
+# XWayland can occasionally discard a synthetic event while focus changes.
+# Retry the key inside the same vkcube process; never spawn another workload.
+home_attempt=0
+while ! grep -q 'overlay=visible input=Home' "$log"; do
+    home_attempt=$((home_attempt + 1))
+    if [ "$home_attempt" -gt 5 ] || ! kill -0 "$child" 2>/dev/null; then
+        cat "$log" >&2
+        cat "$output" >&2
+        exit 1
+    fi
+    NEUROSHADE_TEST_HOME_ATOM="$test_home_atom" '@CMAKE_BINARY_DIR@/bin/ns-send-home'
+    sleep 0.25
+done
+
+kill "$child" 2>/dev/null || true
+wait "$child" 2>/dev/null || true
+child=
+
+if grep -Eq 'Validation Error|VUID-' "$output"; then
+    cat "$output" >&2
+    exit 1
+fi
+printf '%s\n' 'present_processing=pass shader=yes overlay=Home validation=clean single_instance=yes'

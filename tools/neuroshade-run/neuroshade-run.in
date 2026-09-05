@@ -1,0 +1,106 @@
+#!/bin/sh
+set -u
+
+if [ "$#" -eq 0 ]; then
+    printf '%s\n' "usage: neuroshade-run <command> [arguments...]" >&2
+    exit 64
+fi
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+prefix=${NEUROSHADE_ROOT:-$(dirname -- "$script_dir")}
+layer_path=${NEUROSHADE_LAYER_PATH:-"$prefix/share/vulkan/explicit_layer.d"}
+config_home=${XDG_CONFIG_HOME:-"${HOME:?HOME is required}/.config"}/neuroshade
+state_home=${XDG_STATE_HOME:-"$HOME/.local/state"}/neuroshade
+
+rocm_gpu_record() {
+    awk '
+        /^[[:space:]]*Name:/ {
+            value = $0
+            sub(/^.*Name:[[:space:]]*/, "", value)
+            sub(/[[:space:]].*$/, "", value)
+            arch = value ~ /^gfx[0-9a-z]+$/ ? value : ""
+        }
+        /^[[:space:]]*Marketing Name:/ && arch != "" {
+            value = $0
+            sub(/^.*Marketing Name:[[:space:]]*/, "", value)
+            sub(/[[:space:]]+$/, "", value)
+            print arch "\t" value
+            exit
+        }
+    '
+}
+
+command_name=$(basename -- "$1" | tr '[:upper:]' '[:lower:]')
+case "$command_name" in
+    *easyanticheat*|*battleye*|beservice*|vgc*|vgk*)
+        if [ "${NEUROSHADE_ALLOW_ANTICHEAT:-0}" != 1 ]; then
+            printf '%s\n' "neuroshade-run: protected/anti-cheat executable detected: $command_name" >&2
+            printf '%s\n' "NeuroShade was not loaded. Set NEUROSHADE_ALLOW_ANTICHEAT=1 only if the game policy explicitly permits layers." >&2
+            exit 77
+        fi
+        printf '%s\n' "neuroshade-run: WARNING: anti-cheat override explicitly enabled" >&2
+        ;;
+esac
+
+if [ ! -r "$layer_path/VkLayer_neuroshade.json" ]; then
+    printf '%s\n' "neuroshade-run: layer manifest not found: $layer_path/VkLayer_neuroshade.json" >&2
+    exit 66
+fi
+
+if [ -z "${NEUROSHADE_PROFILE:-}" ] && command -v sha256sum >/dev/null 2>&1; then
+    game_key=$(printf '%s' "$1" | sha256sum | awk '{print $1}')
+    game_record="$config_home/games/$game_key.json"
+    if [ -r "$game_record" ]; then
+        profile=$(sed -n 's/.*"profile"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$game_record" | head -n 1)
+        [ -z "$profile" ] || export NEUROSHADE_PROFILE=$profile
+    fi
+fi
+
+mkdir -p "$state_home"
+session_log="$state_home/session-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+export NEUROSHADE_LOG=$session_log
+{
+    printf 'schema_version=1\n'
+    printf 'runtime_version=@PROJECT_VERSION@\n'
+    printf 'executable=%s\n' "$1"
+    printf 'profile=%s\n' "${NEUROSHADE_PROFILE:-none}"
+    printf 'layer_path=%s\n' "$layer_path"
+    printf 'activation=explicit_per_game\n'
+    if command -v rocminfo >/dev/null 2>&1; then
+        system_info=$(rocminfo 2>/dev/null || true)
+        gpu_record=$(printf '%s\n' "$system_info" | rocm_gpu_record)
+        printf 'gpu=%s\n' "$(printf '%s\n' "$gpu_record" | cut -f2-)"
+        printf 'gfx=%s\n' "$(printf '%s\n' "$gpu_record" | cut -f1)"
+    fi
+    if command -v hipconfig >/dev/null 2>&1; then
+        printf 'rocm_version=%s\n' "$(hipconfig --version 2>/dev/null | head -n 1 || true)"
+    fi
+    if command -v vulkaninfo >/dev/null 2>&1; then
+        vulkan_summary=$(vulkaninfo --summary 2>/dev/null || true)
+        printf 'vulkan_version=%s\n' "$(printf '%s\n' "$vulkan_summary" | sed -n 's/.*Vulkan Instance Version:[[:space:]]*//p' | head -n 1)"
+        printf 'vulkan_driver=%s\n' "$(printf '%s\n' "$vulkan_summary" | sed -n 's/.*driverName[[:space:]]*=[[:space:]]*//p' | head -n 1)"
+    fi
+    for plugin_manifest in "$prefix"/share/neuroshade/plugins/*/manifest.toml; do
+        [ -r "$plugin_manifest" ] || continue
+        plugin_id=$(sed -n 's/^id[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_manifest" | head -n 1)
+        plugin_version=$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$plugin_manifest" | head -n 1)
+        printf 'plugin=%s version=%s\n' "$plugin_id" "$plugin_version"
+    done
+    for model_manifest in "$prefix"/share/neuroshade/models/*.nsmodel/manifest.json; do
+        [ -r "$model_manifest" ] || continue
+        printf 'model=%s manifest_sha256=%s\n' "${model_manifest%/manifest.json}" \
+            "$(sha256sum "$model_manifest" | awk '{print $1}')"
+    done
+    printf 'interop_mode=pending_startup_self_test\n'
+    printf 'resource_selections=%s\n' "${NEUROSHADE_PROFILE:-none}"
+    printf 'pipeline_compile_result=pending_runtime_initialization\n'
+} >> "$session_log"
+
+# Activate the explicit layer only after host diagnostics have completed, so
+# helper processes such as vulkaninfo are never mistaken for the target game.
+export VK_LAYER_PATH="$layer_path${VK_LAYER_PATH:+:$VK_LAYER_PATH}"
+export VK_INSTANCE_LAYERS="VK_LAYER_NEUROSHADE${VK_INSTANCE_LAYERS:+:$VK_INSTANCE_LAYERS}"
+export NEUROSHADE_ENABLED=${NEUROSHADE_ENABLED:-1}
+export NEUROSHADE_GAME_EXECUTABLE=$1
+export NEUROSHADE_ROOT=$prefix
+exec "$@"

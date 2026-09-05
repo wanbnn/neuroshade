@@ -1,0 +1,49 @@
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/importer-roundtrip-cache")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/importer-roundtrip-cache"
+        "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+        "@Python3_EXECUTABLE@"
+            "@CMAKE_CURRENT_SOURCE_DIR@/tools/nsmodel/importer.py" import
+            "@NS_REFERENCE_PTH@"
+            --adapter "@NS_REFERENCE_ADAPTER@"
+            --output "@CMAKE_BINARY_DIR@/share/neuroshade/importer/reference_spatial_gain.nsmodel"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE import_output
+    ERROR_VARIABLE import_error)
+
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "importer step failed (${result})\nstdout:\n${import_output}\nstderr:\n${import_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/importer-roundtrip-cache"
+        "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+        "@CMAKE_RUNTIME_OUTPUT_DIRECTORY@/ns-neural-test"
+        "@CMAKE_BINARY_DIR@/share/neuroshade/importer/reference_spatial_gain.nsmodel"
+    RESULT_VARIABLE result2
+    OUTPUT_VARIABLE runtime_output
+    ERROR_VARIABLE runtime_error)
+
+if(NOT result2 EQUAL 0)
+    message(FATAL_ERROR "ns-neural-test roundtrip failed (${result2})\nstdout:\n${runtime_output}\nstderr:\n${runtime_error}")
+endif()
+
+foreach(expected
+        "status=ok"
+        "weights_only=yes"
+        "verification=tolerance="
+        "preflight=compiled"
+        "content_hash=0x"
+        "adapter_loaded=yes"
+        "runtime=MIGraphX"
+        "bundled_model_changed_output=yes")
+    string(FIND "${import_output}${runtime_output}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "missing '${expected}' in:\nimport:\n${import_output}\nruntime:\n${runtime_output}")
+    endif()
+endforeach()
+
+message(STATUS "importer.roundtrip: PASS\nimport:\n${import_output}\nruntime:\n${runtime_output}")

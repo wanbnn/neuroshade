@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+command -v vkcube >/dev/null 2>&1 || exit 77
+[ -n "${DISPLAY:-}" ] || exit 77
+
+log='@CMAKE_BINARY_DIR@/neural-present-test.log'
+output='@CMAKE_BINARY_DIR@/neural-present-test.out'
+: >"$log"
+: >"$output"
+
+layer_path='@NS_LAYER_MANIFEST_DIR@'
+layers='VK_LAYER_NEUROSHADE'
+if [ -n '@NS_VALIDATION_LAYER_DIR@' ]; then
+    layer_path="$layer_path:@NS_VALIDATION_LAYER_DIR@"
+    layers="VK_LAYER_KHRONOS_validation:$layers"
+fi
+
+DRI_PRIME="${NEUROSHADE_TEST_DRI_PRIME:-}" \
+NEUROSHADE_ROOT='@CMAKE_BINARY_DIR@' \
+NEUROSHADE_PROFILE='@CMAKE_SOURCE_DIR@/tests/data/neural-present-profile.json' \
+NEUROSHADE_ENABLED=1 \
+NEUROSHADE_LOG="$log" \
+VK_LAYER_PATH="$layer_path" \
+VK_INSTANCE_LAYERS="$layers" \
+timeout --kill-after=2s 30s vkcube --c 12 --width 64 --height 64 --wsi xcb \
+    >"$output" 2>&1
+
+grep -q 'present_processing=active backend=neural host_staging extent=64x64' "$log"
+grep -q 'neural_present=executed runtime=MIGraphX mode=spatial interop=HOST-STAGING-FALLBACK output_changed=yes' "$log"
+grep -Eq 'profiler=HIP_EVENTS average_ms=[0-9]+\.[0-9]+' "$log"
+if grep -Eq 'device lost|VK_ERROR_DEVICE_LOST|submit-fail|Validation Error|VUID-' "$log" "$output"; then
+    cat "$log" >&2
+    cat "$output" >&2
+    exit 1
+fi
+printf '%s\n' 'neural_present=pass runtime=MIGraphX staging=visible allocations=preallocated'
+
+fallback_log='@CMAKE_BINARY_DIR@/neural-present-fallback-test.log'
+fallback_output='@CMAKE_BINARY_DIR@/neural-present-fallback-test.out'
+: >"$fallback_log"
+: >"$fallback_output"
+DRI_PRIME="${NEUROSHADE_TEST_DRI_PRIME:-}" \
+NEUROSHADE_ROOT='@CMAKE_BINARY_DIR@' \
+NEUROSHADE_PROFILE='@CMAKE_SOURCE_DIR@/tests/data/neural-present-profile.json' \
+NEUROSHADE_ENABLED=1 \
+NEUROSHADE_TEST_NEURAL_FAILURE=1 \
+NEUROSHADE_LOG="$fallback_log" \
+VK_LAYER_PATH="$layer_path" \
+VK_INSTANCE_LAYERS="$layers" \
+timeout --kill-after=2s 30s vkcube --c 4 --width 64 --height 64 --wsi xcb \
+    >"$fallback_output" 2>&1
+grep -q 'neural_present=copy-fallback runtime=MIGraphX mode=spatial' "$fallback_log"
+
+mismatch_log='@CMAKE_BINARY_DIR@/neural-present-mismatch-test.log'
+mismatch_output='@CMAKE_BINARY_DIR@/neural-present-mismatch-test.out'
+: >"$mismatch_log"
+: >"$mismatch_output"
+DRI_PRIME="${NEUROSHADE_TEST_DRI_PRIME:-}" \
+NEUROSHADE_ROOT='@CMAKE_BINARY_DIR@' \
+NEUROSHADE_PROFILE='@CMAKE_SOURCE_DIR@/tests/data/neural-present-profile.json' \
+NEUROSHADE_ENABLED=1 \
+NEUROSHADE_LOG="$mismatch_log" \
+VK_LAYER_PATH="$layer_path" \
+VK_INSTANCE_LAYERS="$layers" \
+timeout --kill-after=2s 30s vkcube --c 4 --width 80 --height 80 --wsi xcb \
+    >"$mismatch_output" 2>&1
+grep -q 'present_processing=disabled fallback=pass-through reason=swapchain extent does not match neural model bucket' "$mismatch_log"
+if grep -Eq 'device lost|VK_ERROR_DEVICE_LOST|submit-fail|Validation Error|VUID-' \
+        "$fallback_log" "$fallback_output" "$mismatch_log" "$mismatch_output"; then
+    exit 1
+fi
+printf '%s\n' 'neural_present_fallbacks=pass execution=copy extent=pass-through'

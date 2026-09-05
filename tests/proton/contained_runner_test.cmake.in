@@ -1,0 +1,33 @@
+set(root "@CMAKE_BINARY_DIR@/contained-runner-test")
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${root}/prefix")
+
+execute_process(
+    COMMAND /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/run-contained-wine.sh"
+        --prefix "${root}/prefix" --timeout 5 --
+        /bin/sh -c "test \"$WINEPREFIX\" = '${root}/prefix'; exit 0"
+    RESULT_VARIABLE success_result OUTPUT_VARIABLE success_output ERROR_VARIABLE success_error)
+if(NOT success_result EQUAL 0)
+    message(FATAL_ERROR "contained success case failed: ${success_output} ${success_error}")
+endif()
+
+# The transient service must kill every descendant when RuntimeMaxSec expires.
+execute_process(
+    COMMAND /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/run-contained-wine.sh"
+        --prefix "${root}/prefix" --timeout 1 --
+        /bin/sh -c "sleep 30 & wait"
+    RESULT_VARIABLE timeout_result OUTPUT_VARIABLE timeout_output ERROR_VARIABLE timeout_error
+    TIMEOUT 10)
+if(timeout_result EQUAL 0 OR timeout_result MATCHES "timeout")
+    message(FATAL_ERROR "contained timeout case did not terminate normally: ${timeout_output} ${timeout_error}")
+endif()
+
+execute_process(
+    COMMAND /bin/sh -c
+        "for e in /proc/[0-9]*/environ; do [ -r \"$e\" ] || continue; tr '\\000' '\\n' <\"$e\" 2>/dev/null | grep -Fqx 'WINEPREFIX=${root}/prefix' && exit 1; done; exit 0"
+    RESULT_VARIABLE residual_result)
+if(NOT residual_result EQUAL 0)
+    message(FATAL_ERROR "contained timeout left a prefix process alive")
+endif()
+
+message(STATUS "proton.contained_runner: PASS cgroup_cleanup=yes prefix_single_instance=yes")

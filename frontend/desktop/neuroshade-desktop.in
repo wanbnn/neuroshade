@@ -1,0 +1,94 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+cli="$script_dir/neuroshade"
+
+if [ "${1:-}" = --self-test ]; then
+    "$cli" --version
+    printf '%s\n' "desktop_frontend=self-test-pass render_process=no toolkit=zenity"
+    exit 0
+fi
+
+if ! command -v zenity >/dev/null 2>&1; then
+    printf '%s\n' "NeuroShade desktop frontend requires zenity." >&2
+    printf '%s\n' "Use '$cli --help' for the complete command-line frontend." >&2
+    exit 69
+fi
+
+while :; do
+    action=$(zenity --list --title="NeuroShade" --width=560 --height=420 \
+        --text="NeuroShade control center (runs outside the game process)" \
+        --column="Action" --column="Description" \
+        "Doctor" "GPU and runtime compatibility" \
+        "Self-test" "Run Vulkan/HIP and neural compatibility tests" \
+        "Add game" "Register executable and profile" \
+        "Games" "Registered games and launch profiles" \
+        "Plugins" "Bundled and user-installed plugins" \
+        "Install plugin" "Install a shader plugin directory" \
+        "Models" "Bundled and user-installed neural models" \
+        "Install model" "Install a validated .nsmodel directory" \
+        "Import model" "Convert a trusted .pth using an architecture adapter" \
+        "Launch" "Launch a command through the explicit Vulkan layer" \
+        "Clear cache" "Remove compiled model caches" \
+        "Verify" "Verify hashes of user packages" \
+        "Logs" "Open the user log directory" \
+        "Quit" "Close NeuroShade" 2>/dev/null) || exit 0
+    case "$action" in
+        Doctor) message=$($cli doctor 2>&1 || true); zenity --info --title="NeuroShade Doctor" --text="$message";;
+        "Self-test") message=$($cli doctor --deep 2>&1 || true); zenity --text-info --title="Compatibility self-test" --width=760 --height=520 <<EOF
+$message
+EOF
+            ;;
+        "Add game")
+            values=$(zenity --forms --title="Add game" --text="Register a game" \
+                --add-entry="Executable" --add-entry="Profile path" 2>/dev/null) || continue
+            executable=${values%%|*}; profile=${values#*|}
+            message=$($cli game add "$executable" "$profile" 2>&1 || true)
+            zenity --info --title="NeuroShade" --text="$message";;
+        Games) message=$($cli game list 2>&1 || true); zenity --text-info --title="Games" --width=700 --height=420 <<EOF
+$message
+EOF
+            ;;
+        Plugins) message=$($cli plugin list 2>&1 || true); zenity --text-info --title="Plugins" --width=700 --height=420 <<EOF
+$message
+EOF
+            ;;
+        "Install plugin")
+            directory=$(zenity --file-selection --directory --title="Select plugin directory" 2>/dev/null) || continue
+            message=$($cli plugin install "$directory" 2>&1 || true)
+            zenity --info --title="Plugin installation" --text="$message";;
+        Models) message=$($cli model list 2>&1 || true); zenity --text-info --title="Models" --width=700 --height=420 <<EOF
+$message
+EOF
+            ;;
+        "Install model")
+            directory=$(zenity --file-selection --directory --title="Select .nsmodel directory" 2>/dev/null) || continue
+            message=$($cli model install "$directory" 2>&1 || true)
+            zenity --info --title="Model installation" --text="$message";;
+        "Import model")
+            values=$(zenity --forms --title="Import model" \
+                --text="The importer runs outside the game process. Use only trusted adapters." \
+                --add-entry="Model .pth" --add-entry="Adapter .py" 2>/dev/null) || continue
+            pth=${values%%|*}; adapter=${values#*|}
+            message=$($cli model import "$pth" --adapter "$adapter" 2>&1 || true)
+            zenity --text-info --title="Model import" --width=760 --height=480 <<EOF
+$message
+EOF
+            ;;
+        Launch)
+            command=$(zenity --entry --title="Launch with NeuroShade" \
+                --text="Executable path (arguments can be configured in Steam with neuroshade-run %command%)" 2>/dev/null) || continue
+            [ -z "$command" ] || "$cli" launch "$command" &
+            ;;
+        "Clear cache")
+            if zenity --question --title="Clear NeuroShade cache" \
+                --text="Remove compiled model caches? They will be rebuilt on demand."; then
+                message=$($cli cache clear 2>&1 || true)
+                zenity --info --title="NeuroShade" --text="$message"
+            fi;;
+        Verify) message=$($cli verify 2>&1 || true); zenity --info --title="Package verification" --text="${message:-No user packages installed}";;
+        Logs) logs=$($cli logs); mkdir -p "$logs"; xdg-open "$logs" >/dev/null 2>&1 || true;;
+        Quit) exit 0;;
+    esac
+done

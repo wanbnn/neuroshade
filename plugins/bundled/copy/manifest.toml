@@ -1,0 +1,12 @@
+schema = 1
+id = "org.neuroshade.copy"
+name = "Copy"
+version = "1.0.0"
+api = 1
+
+[[passes]]
+id = "copy"
+backend = "shader"
+shader = "copy.spv"
+inputs = ["Color.Final"]
+output = "Output.Color"

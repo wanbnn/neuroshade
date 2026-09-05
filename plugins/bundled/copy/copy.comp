@@ -1,0 +1,12 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels { uint input_pixels[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels { uint output_pixels[]; };
+layout(push_constant) uniform Parameters { uint width; uint height; float strength; } parameters;
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint count = parameters.width * parameters.height;
+    if (index < count) output_pixels[index] = input_pixels[index];
+}

@@ -1,0 +1,63 @@
+#version 450
+
+layout(local_size_x = 64) in;
+
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels {
+    uint input_pixels[];
+};
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels {
+    uint output_pixels[];
+};
+layout(push_constant) uniform Parameters {
+    uint width;
+    uint height;
+    float strength;
+} parameters;
+
+uint blend_channel(uint source, uint target, uint alpha) {
+    return (source * (255u - alpha) + target * alpha) / 255u;
+}
+
+uint blend(uint source, uint target, uint alpha) {
+    uint result = 0u;
+    for (uint shift = 0u; shift < 24u; shift += 8u) {
+        uint channel = blend_channel((source >> shift) & 255u,
+                                     (target >> shift) & 255u, alpha);
+        result |= channel << shift;
+    }
+    return result | (source & 0xff000000u);
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint pixel_count = parameters.width * parameters.height;
+    if (index >= pixel_count) return;
+    uint source = input_pixels[index];
+    uint x = index % parameters.width;
+    uint y = index / parameters.width;
+    uint panel_width = min(parameters.width, 440u);
+    uint panel_height = min(parameters.height, 280u);
+    if (x >= panel_width || y >= panel_height) {
+        output_pixels[index] = source;
+        return;
+    }
+
+    bool border = x < 3u || y < 3u || x + 3u >= panel_width || y + 3u >= panel_height;
+    bool header = y >= 3u && y < min(panel_height, 44u);
+    bool tab_rail = x >= 12u && x < min(panel_width, 150u) && y >= 58u && y < panel_height - 12u;
+    bool active_tab = tab_rail && y < 82u;
+    bool metric = x >= 170u && x < panel_width - 20u && y >= 66u && y < 78u;
+    uint target = 0x00171614u;
+    uint alpha = 210u;
+    if (border || active_tab || metric) {
+        target = 0x00d7a428u;
+        alpha = 235u;
+    } else if (header) {
+        target = 0x00372a20u;
+        alpha = 225u;
+    } else if (tab_rail && ((y - 58u) % 28u) < 18u) {
+        target = 0x00403830u;
+        alpha = 210u;
+    }
+    output_pixels[index] = blend(source, target, alpha);
+}

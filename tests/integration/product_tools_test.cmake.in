@@ -1,0 +1,246 @@
+set(root "@CMAKE_BINARY_DIR@/product-tools-test")
+set(payload "${root}/payload")
+set(home "${root}/home")
+set(prefix "${home}/.local")
+set(config "${home}/.config")
+set(data "${home}/.local/share")
+set(state "${home}/.local/state")
+set(cache "${home}/.cache")
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${home}")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" --install "@CMAKE_BINARY_DIR@" --prefix "${payload}"
+    RESULT_VARIABLE install_payload_result OUTPUT_QUIET ERROR_VARIABLE install_payload_error)
+if(NOT install_payload_result EQUAL 0)
+    message(FATAL_ERROR "could not stage product payload: ${install_payload_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+            "HOME=${home}" "XDG_CONFIG_HOME=${config}" "XDG_DATA_HOME=${data}"
+            "XDG_STATE_HOME=${state}" "XDG_CACHE_HOME=${cache}"
+            /bin/sh "@CMAKE_SOURCE_DIR@/packaging/linux/install.sh"
+            --prefix "${prefix}" --payload "${payload}"
+    RESULT_VARIABLE install_result OUTPUT_VARIABLE install_output ERROR_VARIABLE install_error)
+if(NOT install_result EQUAL 0 OR NOT install_output MATCHES "installed without root")
+    message(FATAL_ERROR "installer failed: ${install_output} ${install_error}")
+endif()
+if(NOT EXISTS "${config}/neuroshade/config.json")
+    message(FATAL_ERROR "installer did not create the versioned default configuration")
+endif()
+
+set(product_env
+    "HOME=${home}"
+    "XDG_CONFIG_HOME=${config}"
+    "XDG_DATA_HOME=${data}"
+    "XDG_STATE_HOME=${state}"
+    "XDG_CACHE_HOME=${cache}")
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" doctor --json
+    RESULT_VARIABLE doctor_result OUTPUT_VARIABLE doctor_output ERROR_VARIABLE doctor_error)
+if(NOT doctor_result EQUAL 0 OR NOT doctor_output MATCHES "compatibility_class")
+    message(FATAL_ERROR "doctor failed: ${doctor_output} ${doctor_error}")
+endif()
+if("@NS_BUILD_HIP_INTEROP@" STREQUAL "ON" AND
+   (NOT doctor_output MATCHES "\"gpu\":\"AMD Radeon RX 9060 XT\"" OR
+    NOT doctor_output MATCHES "\"gfx\":\"gfx1200\""))
+    message(FATAL_ERROR "doctor mixed ROCm agent identity: ${doctor_output}")
+endif()
+if("@NS_MIGRAPHX_AVAILABLE@" STREQUAL "ON" AND "@NS_BUILD_HIP_INTEROP@" STREQUAL "ON")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+                "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+                "${prefix}/bin/neuroshade" doctor --deep
+        RESULT_VARIABLE deep_result OUTPUT_VARIABLE deep_output ERROR_VARIABLE deep_error)
+    if(NOT deep_result EQUAL 0 OR NOT deep_output MATCHES "interop_self_test=pass" OR
+       NOT deep_output MATCHES "neural_self_test=pass")
+        message(FATAL_ERROR "deep doctor failed: ${deep_output} ${deep_error}")
+    endif()
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" game add /games/example.exe
+            "${prefix}/share/neuroshade/profiles/examples/temporal_sr_2x.json"
+    RESULT_VARIABLE game_add_result OUTPUT_VARIABLE game_add_output ERROR_VARIABLE game_add_error)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" game list
+    RESULT_VARIABLE game_list_result OUTPUT_VARIABLE game_list_output ERROR_VARIABLE game_list_error)
+if(NOT game_add_result EQUAL 0 OR NOT game_list_result EQUAL 0 OR
+   NOT game_list_output MATCHES "/games/example.exe")
+    message(FATAL_ERROR "game manager failed: ${game_add_output} ${game_add_error} ${game_list_error}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" profile show /games/example.exe
+    RESULT_VARIABLE profile_show_result OUTPUT_VARIABLE profile_show_output ERROR_VARIABLE profile_show_error)
+if(NOT profile_show_result EQUAL 0 OR NOT profile_show_output MATCHES "temporal_sr_2x")
+    message(FATAL_ERROR "profile show failed: ${profile_show_output} ${profile_show_error}")
+endif()
+
+file(WRITE "${cache}/neuroshade/cache-entry" "cached")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" cache clear
+    RESULT_VARIABLE cache_result OUTPUT_VARIABLE cache_output ERROR_VARIABLE cache_error)
+if(NOT cache_result EQUAL 0 OR EXISTS "${cache}/neuroshade/cache-entry")
+    message(FATAL_ERROR "cache manager failed: ${cache_output} ${cache_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" plugin install
+            "@CMAKE_SOURCE_DIR@/plugins/bundled/copy"
+    RESULT_VARIABLE plugin_result OUTPUT_VARIABLE plugin_output ERROR_VARIABLE plugin_error)
+set(test_model "${root}/product_test.nsmodel")
+file(MAKE_DIRECTORY "${test_model}")
+file(WRITE "${test_model}/manifest.json"
+    "{\"schema\":1,\"id\":\"org.neuroshade.test.product_model\",\"name\":\"Product test\",\"version\":\"1.0.0\",\"runtime\":\"migraphx\",\"inputs\":[{\"semantic\":\"Color.Final\",\"tensor\":\"input\",\"dtype\":\"fp32\",\"layout\":\"NCHW\"}],\"output\":{\"semantic\":\"Output.Color\",\"tensor\":\"output\",\"dtype\":\"fp32\",\"layout\":\"NCHW\"},\"history\":0,\"scale\":{\"x\":1,\"y\":1},\"first_frame\":\"spatial\",\"shapes\":{\"kind\":\"fixed\",\"buckets\":[{\"input\":[1,4,1,1],\"output\":[1,4,1,1]}]}}\n")
+file(WRITE "${test_model}/model.onnx" "onnx-test")
+file(WRITE "${test_model}/signature.json" "{\"schema\":1}\n")
+file(WRITE "${test_model}/metadata.json" "{\"schema\":1}\n")
+file(WRITE "${test_model}/preview.webp" "preview-test")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" model install
+            "${test_model}"
+    RESULT_VARIABLE model_result OUTPUT_VARIABLE model_output ERROR_VARIABLE model_error)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" verify
+    RESULT_VARIABLE verify_result OUTPUT_VARIABLE verify_output ERROR_VARIABLE verify_error)
+if(NOT plugin_result EQUAL 0 OR NOT model_result EQUAL 0 OR NOT verify_result EQUAL 0 OR
+   NOT verify_output MATCHES "bundled-plugin-assets" OR
+   NOT verify_output MATCHES "org.neuroshade.copy" OR
+   NOT verify_output MATCHES "org.neuroshade.test.product_model")
+    message(FATAL_ERROR "package managers failed: ${plugin_error} ${model_error} ${verify_error}")
+endif()
+
+execute_process(
+    COMMAND /usr/bin/python3 "${prefix}/libexec/neuroshade/nsmodel-importer.py" --help
+    RESULT_VARIABLE importer_help_result OUTPUT_VARIABLE importer_help_output ERROR_VARIABLE importer_help_error)
+if(NOT importer_help_result EQUAL 0 OR NOT importer_help_output MATCHES "pth.*nsmodel importer")
+    message(FATAL_ERROR "installed importer is unusable: ${importer_help_output} ${importer_help_error}")
+endif()
+if("@NS_MIGRAPHX_AVAILABLE@" STREQUAL "ON")
+    execute_process(
+        COMMAND /usr/bin/python3 -c "import site; print(site.getusersitepackages())"
+        OUTPUT_VARIABLE importer_user_site OUTPUT_STRIP_TRAILING_WHITESPACE)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+                "NEUROSHADE_PYTHON=/usr/bin/python3"
+                "PYTHONPATH=${importer_user_site}"
+                "LD_LIBRARY_PATH=@NS_MIGRAPHX_LIBRARY_PATH@:/opt/rocm/lib"
+                "${prefix}/bin/neuroshade" model import
+                "@NS_REFERENCE_PTH@" --adapter
+                "${prefix}/share/neuroshade/importer/adapters/spatial_gain.py"
+        RESULT_VARIABLE model_import_result OUTPUT_VARIABLE model_import_output ERROR_VARIABLE model_import_error)
+    if(NOT model_import_result EQUAL 0 OR NOT model_import_output MATCHES "weights_only=yes" OR
+       NOT EXISTS "${data}/neuroshade/models/org.neuroshade.bundled.spatial_gain.nsmodel/model.onnx")
+        message(FATAL_ERROR "installed model import failed: ${model_import_output} ${model_import_error}")
+    endif()
+endif()
+
+set(unsafe_plugin "${root}/unsafe-plugin")
+file(MAKE_DIRECTORY "${unsafe_plugin}")
+file(WRITE "${unsafe_plugin}/manifest.toml"
+    "schema = 1\nid = \"org.neuroshade.test.unsafe\"\nbackend = \"native\"\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" plugin install "${unsafe_plugin}"
+    RESULT_VARIABLE unsafe_denied OUTPUT_VARIABLE unsafe_denied_output ERROR_VARIABLE unsafe_denied_error)
+if(unsafe_denied EQUAL 0 OR NOT unsafe_denied_error MATCHES "trusted code")
+    message(FATAL_ERROR "unsafe plugin did not require explicit trust")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" plugin install "${unsafe_plugin}" --trust-unsafe
+    RESULT_VARIABLE unsafe_allowed OUTPUT_VARIABLE unsafe_allowed_output ERROR_VARIABLE unsafe_allowed_error)
+if(NOT unsafe_allowed EQUAL 0)
+    message(FATAL_ERROR "explicit unsafe plugin trust failed: ${unsafe_allowed_error}")
+endif()
+
+file(APPEND "${data}/neuroshade/plugins/org.neuroshade.copy/manifest.toml" "\n# modified\n")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" verify
+    RESULT_VARIABLE tamper_result OUTPUT_VARIABLE tamper_output ERROR_VARIABLE tamper_error)
+if(tamper_result EQUAL 0 OR NOT tamper_error MATCHES "modified.*org.neuroshade.copy")
+    message(FATAL_ERROR "package tampering was not detected")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" plugin remove org.neuroshade.test.unsafe
+    RESULT_VARIABLE plugin_remove_result OUTPUT_VARIABLE plugin_remove_output ERROR_VARIABLE plugin_remove_error)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" model remove org.neuroshade.test.product_model
+    RESULT_VARIABLE model_remove_result OUTPUT_VARIABLE model_remove_output ERROR_VARIABLE model_remove_error)
+if(NOT plugin_remove_result EQUAL 0 OR NOT model_remove_result EQUAL 0 OR
+   EXISTS "${data}/neuroshade/plugins/org.neuroshade.test.unsafe" OR
+   EXISTS "${data}/neuroshade/models/org.neuroshade.test.product_model.nsmodel")
+    message(FATAL_ERROR "package removal failed: ${plugin_remove_error} ${model_remove_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade-desktop" --self-test
+    RESULT_VARIABLE frontend_result OUTPUT_VARIABLE frontend_output ERROR_VARIABLE frontend_error)
+if(NOT frontend_result EQUAL 0 OR NOT frontend_output MATCHES "desktop_frontend=self-test-pass")
+    message(FATAL_ERROR "desktop frontend self-test failed: ${frontend_output} ${frontend_error}")
+endif()
+
+set(launch_probe "${root}/launch-probe.sh")
+file(WRITE "${launch_probe}"
+    "#!/bin/sh\n[ \"$NEUROSHADE_PROFILE\" = \"${prefix}/share/neuroshade/profiles/examples/temporal_sr_2x.json\" ] || exit 81\n[ -n \"$NEUROSHADE_LOG\" ] && [ -f \"$NEUROSHADE_LOG\" ] || exit 82\nexit 0\n")
+execute_process(COMMAND chmod 755 "${launch_probe}")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" game add "${launch_probe}"
+            "${prefix}/share/neuroshade/profiles/examples/temporal_sr_2x.json"
+    RESULT_VARIABLE probe_add_result OUTPUT_QUIET ERROR_VARIABLE probe_add_error)
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" launch "${launch_probe}"
+    RESULT_VARIABLE launch_result OUTPUT_VARIABLE launch_output ERROR_VARIABLE launch_error)
+if(NOT probe_add_result EQUAL 0 OR NOT launch_result EQUAL 0)
+    message(FATAL_ERROR "profile-aware launch failed: ${probe_add_error} ${launch_output} ${launch_error}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade" diagnostic export "${root}/diagnostic.tar.gz"
+    RESULT_VARIABLE diagnostic_result OUTPUT_VARIABLE diagnostic_output ERROR_VARIABLE diagnostic_error)
+if(NOT diagnostic_result EQUAL 0 OR NOT EXISTS "${root}/diagnostic.tar.gz")
+    message(FATAL_ERROR "diagnostic export failed: ${diagnostic_output} ${diagnostic_error}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar tf "${root}/diagnostic.tar.gz"
+    RESULT_VARIABLE diagnostic_list_result OUTPUT_VARIABLE diagnostic_files ERROR_VARIABLE diagnostic_list_error)
+if(NOT diagnostic_list_result EQUAL 0 OR NOT diagnostic_files MATCHES "system.json" OR
+   NOT diagnostic_files MATCHES "profiles.txt" OR NOT diagnostic_files MATCHES "session.log")
+    message(FATAL_ERROR "diagnostic archive is incomplete: ${diagnostic_files} ${diagnostic_list_error}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
+            "${prefix}/bin/neuroshade-run" /tmp/EasyAntiCheat_launcher
+    RESULT_VARIABLE anticheat_result OUTPUT_VARIABLE anticheat_output ERROR_VARIABLE anticheat_error)
+if(NOT anticheat_result EQUAL 77 OR NOT anticheat_error MATCHES "was not loaded")
+    message(FATAL_ERROR "anti-cheat default deny policy failed")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "HOME=${home}"
+            /bin/sh "@CMAKE_SOURCE_DIR@/packaging/linux/uninstall.sh" --prefix "${prefix}"
+    RESULT_VARIABLE uninstall_result OUTPUT_VARIABLE uninstall_output ERROR_VARIABLE uninstall_error)
+if(NOT uninstall_result EQUAL 0 OR EXISTS "${prefix}/bin/neuroshade")
+    message(FATAL_ERROR "uninstaller failed: ${uninstall_output} ${uninstall_error}")
+endif()
+if(NOT EXISTS "${config}/neuroshade/games")
+    message(FATAL_ERROR "uninstaller did not preserve user profiles")
+endif()
+
+message(STATUS "product.tools: PASS doctor game_manager plugin_manager model_manager hashing frontend installer uninstaller")

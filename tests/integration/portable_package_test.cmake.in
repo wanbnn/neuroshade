@@ -1,0 +1,61 @@
+set(root "@CMAKE_BINARY_DIR@/portable-package-test")
+set(first "${root}/first")
+set(second "${root}/second")
+file(REMOVE_RECURSE "${root}")
+file(MAKE_DIRECTORY "${first}" "${second}")
+
+foreach(output IN ITEMS "${first}" "${second}")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "SOURCE_DATE_EPOCH=1700000000"
+            /bin/sh "@CMAKE_SOURCE_DIR@/packaging/linux/build-portable.sh"
+            "@CMAKE_BINARY_DIR@" "${output}"
+        RESULT_VARIABLE package_result OUTPUT_VARIABLE package_output ERROR_VARIABLE package_error)
+    if(NOT package_result EQUAL 0)
+        message(FATAL_ERROR "portable package failed: ${package_output} ${package_error}")
+    endif()
+endforeach()
+
+file(GLOB first_archive "${first}/NeuroShade-*-linux-x86_64.tar.gz")
+file(GLOB second_archive "${second}/NeuroShade-*-linux-x86_64.tar.gz")
+list(LENGTH first_archive first_count)
+list(LENGTH second_archive second_count)
+if(NOT first_count EQUAL 1 OR NOT second_count EQUAL 1)
+    message(FATAL_ERROR "portable package did not produce exactly one archive")
+endif()
+file(SHA256 "${first_archive}" first_hash)
+file(SHA256 "${second_archive}" second_hash)
+if(NOT first_hash STREQUAL second_hash)
+    message(FATAL_ERROR "portable archives are not reproducible: ${first_hash} != ${second_hash}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E tar xzf "${first_archive}"
+    WORKING_DIRECTORY "${root}"
+    RESULT_VARIABLE extract_result ERROR_VARIABLE extract_error)
+if(NOT extract_result EQUAL 0)
+    message(FATAL_ERROR "portable archive extraction failed: ${extract_error}")
+endif()
+file(GLOB package_root "${root}/NeuroShade-*-linux-x86_64")
+if(NOT EXISTS "${package_root}/install.sh" OR NOT EXISTS "${package_root}/uninstall.sh" OR
+   NOT EXISTS "${package_root}/SHA256SUMS" OR
+   NOT EXISTS "${package_root}/payload/bin/neuroshade")
+    message(FATAL_ERROR "portable archive is incomplete")
+endif()
+
+set(portable_home "${root}/portable-home")
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "HOME=${portable_home}"
+            /bin/sh "${package_root}/install.sh" --prefix "${portable_home}/.local"
+    RESULT_VARIABLE install_result OUTPUT_VARIABLE install_output ERROR_VARIABLE install_error)
+if(NOT install_result EQUAL 0 OR NOT EXISTS "${portable_home}/.local/bin/neuroshade")
+    message(FATAL_ERROR "portable checksum/install flow failed: ${install_output} ${install_error}")
+endif()
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env "HOME=${portable_home}"
+            /bin/sh "${package_root}/uninstall.sh" --prefix "${portable_home}/.local"
+    RESULT_VARIABLE uninstall_result OUTPUT_VARIABLE uninstall_output ERROR_VARIABLE uninstall_error)
+if(NOT uninstall_result EQUAL 0 OR EXISTS "${portable_home}/.local/bin/neuroshade")
+    message(FATAL_ERROR "portable uninstall flow failed: ${uninstall_output} ${uninstall_error}")
+endif()
+
+message(STATUS "product.portable_package: PASS sha256=${first_hash}")

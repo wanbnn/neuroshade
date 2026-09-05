@@ -1,0 +1,23 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://neuroshade.dev/schemas/signature.schema.json",
+  "title": "NeuroShade .nsmodel signature",
+  "description": "Input/output shape + dtype contract. The C++ loader only enforces schema=1; the rest is for downstream consumers.",
+  "type": "object",
+  "required": ["schema", "inputs", "outputs"],
+  "properties": {
+    "schema":  { "const": 1 },
+    "inputs":  { "type": "object", "additionalProperties": { "$ref": "#/$defs/tensor_spec" } },
+    "outputs": { "type": "object", "additionalProperties": { "$ref": "#/$defs/tensor_spec" } }
+  },
+  "$defs": {
+    "tensor_spec": {
+      "type": "object",
+      "required": ["dtype", "shape"],
+      "properties": {
+        "dtype": { "enum": ["fp16", "fp32"] },
+        "shape": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+      }
+    }
+  }
+}

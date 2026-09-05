@@ -1,0 +1,55 @@
+# IMP-005: an adapter whose ONNX graph contains an op MIGraphX rejects
+# must fail the importer before the .nsmodel is created. The preflight is
+# the gate that determines game-launch safety; the verifier firing first
+# only means the upstream backend (here onnxruntime) cannot execute the
+# graph either — either failure is sufficient.
+
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/unsupported-op-fixture")
+
+# Build a `.pth` containing an empty state-dict (the unsupported_op module
+# has no parameters, matching the bad-arch fixture above).
+execute_process(
+    COMMAND "@Python3_EXECUTABLE@" "-c"
+        "import torch, pathlib; \
+        pathlib.Path('@CMAKE_BINARY_DIR@/unsupported-op-fixture').mkdir(parents=True, exist_ok=True); \
+        torch.save({}, '@CMAKE_BINARY_DIR@/unsupported-op-fixture/state.pth')"
+    RESULT_VARIABLE seed_result
+    OUTPUT_VARIABLE seed_output
+    ERROR_VARIABLE seed_error)
+
+if(NOT seed_result EQUAL 0)
+    message(FATAL_ERROR "could not build unsupported-op fixture (${seed_result})\n${seed_output}\n${seed_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "NEUROSHADE_NO_INSTALL=1"
+        "@Python3_EXECUTABLE@"
+            "@CMAKE_CURRENT_SOURCE_DIR@/tools/nsmodel/importer.py" import
+            "@CMAKE_BINARY_DIR@/unsupported-op-fixture/state.pth"
+            --adapter "@CMAKE_CURRENT_SOURCE_DIR@/importer/adapters/unsupported_op.py"
+            --output "@CMAKE_BINARY_DIR@/unsupported-op-fixture/unsupported.nsmodel"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(result EQUAL 0)
+    message(FATAL_ERROR "expected importer failure on unsupported op\noutput:\n${output}\nerror:\n${error}")
+endif()
+
+string(FIND "${output}" "status=fail" found_status)
+if(found_status EQUAL -1)
+    message(FATAL_ERROR "missing status=fail marker\noutput:\n${output}\nerror:\n${error}")
+endif()
+
+# The failure can be either verification_error (onnxruntime refuses
+# `optional(tensor(...))`) or preflight_error (MIGraphX refuses). Either is
+# IMP-005 compliant — both gate the .nsmodel from being shipped to a game.
+string(FIND "${output}" "reason=verification_error" reasons_v)
+string(FIND "${output}" "reason=preflight_error" reasons_p)
+string(FIND "${output}" "reason=adapter_error" reasons_a)
+if(reasons_v EQUAL -1 AND reasons_p EQUAL -1 AND reasons_a EQUAL -1)
+    message(FATAL_ERROR "expected verification/preflight/adapter error marker\noutput:\n${output}\nerror:\n${error}")
+endif()
+
+message(STATUS "importer.unsupported_op: PASS")

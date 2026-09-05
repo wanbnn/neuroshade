@@ -1,0 +1,30 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels { uint input_pixels[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels { uint output_pixels[]; };
+layout(push_constant) uniform Parameters { uint width; uint height; float strength; } parameters;
+
+int component(uint pixel, uint shift) { return int((pixel >> shift) & 255u); }
+uint clipped(float value) { return uint(clamp(round(value), 0.0, 255.0)); }
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    uint count = parameters.width * parameters.height;
+    if (index >= count) return;
+    uint x = index % parameters.width;
+    uint y = index / parameters.width;
+    uint left = input_pixels[y * parameters.width + max(x, 1u) - 1u];
+    uint right = input_pixels[y * parameters.width + min(x + 1u, parameters.width - 1u)];
+    uint up = input_pixels[max(y, 1u) * parameters.width - parameters.width + x];
+    uint down = input_pixels[min(y + 1u, parameters.height - 1u) * parameters.width + x];
+    uint center = input_pixels[index];
+    uint result = center & 0xff000000u;
+    for (uint shift = 0u; shift < 24u; shift += 8u) {
+        float edge = 4.0 * float(component(center, shift)) - float(component(left, shift)) -
+                     float(component(right, shift)) - float(component(up, shift)) - float(component(down, shift));
+        float contrast = (float(component(center, shift)) - 128.0) * 0.05;
+        result |= clipped(float(component(center, shift)) + parameters.strength * (edge + contrast)) << shift;
+    }
+    output_pixels[index] = result;
+}

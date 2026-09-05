@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "game": {"executable": "vkcube-neural-present"},
+  "output_extent": {"width": 64, "height": 64},
+  "pipeline": [
+    {"plugin": "org.neuroshade.bundled.spatial_gain", "enabled": true, "model": "models/spatial_gain.nsmodel", "strength": 1.0}
+  ]
+}

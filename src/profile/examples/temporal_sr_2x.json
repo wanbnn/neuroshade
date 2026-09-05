@@ -1,0 +1,18 @@
+{
+  "schema_version": 2,
+  "game": {"executable": "v1-game-with-temporal-sr"},
+  "output_extent": {"width": 1920, "height": 1080},
+  "pipeline": [
+    {
+      "plugin": "org.neuroshade.bundled.temporal_sr_2x",
+      "enabled": true,
+      "model": "models/temporal_sr_2x.nsmodel",
+      "strength": 1.0,
+      "resource_bindings": [
+        {"semantic": "Color.LowRes",          "runtime_id": 0, "format": 0, "width": 500, "height": 500},
+        {"semantic": "Motion.Screen",         "runtime_id": 0, "format": 0, "width": 1000, "height": 1000},
+        {"semantic": "History.Output.Color",  "runtime_id": 0, "format": 0, "width": 1000, "height": 1000}
+      ]
+    }
+  ]
+}

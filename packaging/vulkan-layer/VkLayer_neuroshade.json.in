@@ -1,0 +1,14 @@
+{
+  "file_format_version": "1.2.0",
+  "layer": {
+    "name": "VK_LAYER_NEUROSHADE",
+    "type": "GLOBAL",
+    "library_path": "../../../lib/neuroshade/libVkLayer_neuroshade.so",
+    "api_version": "1.4.0",
+    "implementation_version": "1",
+    "description": "NeuroShade explicit Vulkan post-processing layer",
+    "functions": {
+      "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+    }
+  }
+}

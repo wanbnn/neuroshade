@@ -1,0 +1,22 @@
+#version 450
+
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0, std430) readonly buffer InputPixels { uint input_pixels[]; };
+layout(set = 0, binding = 1, std430) writeonly buffer OutputPixels { uint output_pixels[]; };
+layout(push_constant) uniform Parameters { uint width; uint height; float strength; } parameters;
+
+uint adjust(uint value, float scale, float offset) {
+    return uint(clamp(round(float(value) * scale + offset), 0.0, 255.0));
+}
+
+void main() {
+    uint index = gl_GlobalInvocationID.x;
+    if (index >= parameters.width * parameters.height) return;
+    uint pixel = input_pixels[index];
+    float scale = 1.0 + 0.15 * parameters.strength;
+    float offset = 8.0 * parameters.strength;
+    uint r = adjust(pixel & 255u, scale, offset);
+    uint g = adjust((pixel >> 8u) & 255u, scale, offset * 0.5);
+    uint b = adjust((pixel >> 16u) & 255u, scale, 0.0);
+    output_pixels[index] = r | (g << 8u) | (b << 16u) | (pixel & 0xff000000u);
+}

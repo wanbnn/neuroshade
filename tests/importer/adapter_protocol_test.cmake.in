@@ -1,0 +1,40 @@
+file(REMOVE_RECURSE "@CMAKE_BINARY_DIR@/importer-adapter-cache")
+
+# Use a temporary fixture .pth so the verify command has something to load.
+file(MAKE_DIRECTORY "@CMAKE_BINARY_DIR@/importer-adapter-fixture")
+
+execute_process(
+    COMMAND "@Python3_EXECUTABLE@" "-c"
+        "import torch, sys; torch.save({}, \
+            '@CMAKE_BINARY_DIR@/importer-adapter-fixture/state.pth')"
+    RESULT_VARIABLE seed_result
+    OUTPUT_VARIABLE seed_output
+    ERROR_VARIABLE seed_error)
+if(NOT seed_result EQUAL 0)
+    message(FATAL_ERROR "could not seed verify fixture\n${seed_output}\n${seed_error}")
+endif()
+
+execute_process(
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "XDG_CACHE_HOME=@CMAKE_BINARY_DIR@/importer-adapter-cache"
+        "@Python3_EXECUTABLE@"
+            "@CMAKE_CURRENT_SOURCE_DIR@/tools/nsmodel/importer.py" verify
+            "@CMAKE_BINARY_DIR@/importer-adapter-fixture/state.pth"
+            --adapter "@NS_REFERENCE_ADAPTER@"
+            "@NS_REFERENCE_MODEL_DIR@"
+    RESULT_VARIABLE result
+    OUTPUT_VARIABLE output
+    ERROR_VARIABLE error)
+
+if(NOT result EQUAL 0)
+    message(FATAL_ERROR "verify call failed (${result})\nstdout:\n${output}\nstderr:\n${error}")
+endif()
+
+foreach(expected "status=ok" "verification=tolerance=" "backend=")
+    string(FIND "${output}" "${expected}" found)
+    if(found EQUAL -1)
+        message(FATAL_ERROR "missing '${expected}' in output:\n${output}\nstderr:\n${error}")
+    endif()
+endforeach()
+
+message(STATUS "importer.adapter_protocol: PASS\n${output}")

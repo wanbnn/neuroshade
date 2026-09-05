@@ -1,0 +1,8 @@
+{
+  "schema_version": 2,
+  "game": {"executable": "vkcube-temporal-present"},
+  "output_extent": {"width": 64, "height": 64},
+  "pipeline": [
+    {"plugin": "org.neuroshade.bundled.temporal_blend", "enabled": true, "model": "models/temporal_blend.nsmodel", "strength": 1.0}
+  ]
+}
