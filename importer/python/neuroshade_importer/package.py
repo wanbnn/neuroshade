@@ -105,6 +105,12 @@ def package_hash_matches(out_dir: Path) -> str | None:
         if not path.is_file():
             return None
         blobs.append(path.read_bytes())
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    if manifest.get("runtime") == "pytorch":
+        weights = out_dir / "model.safetensors"
+        if not weights.is_file(): weights = out_dir / "model.pth"
+        if not weights.is_file(): return None
+        blobs.append(weights.read_bytes())
     return stable_hash(blobs)
 
 

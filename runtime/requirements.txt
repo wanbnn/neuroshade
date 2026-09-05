@@ -1,0 +1,6 @@
+# PyTorch is provided by the host (ROCm/CUDA builds are device-specific).
+spandrel==0.4.2
+onnx>=1.16
+onnxruntime>=1.20
+numpy>=1.26
+Pillow>=10

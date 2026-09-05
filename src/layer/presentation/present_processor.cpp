@@ -1,5 +1,6 @@
 #include "layer/presentation/present_processor.hpp"
 #include "logging/log.hpp"
+#include "neural/runtime/host_client.hpp"
 
 #if defined(NEUROSHADE_LAYER_NEURAL)
 #include "neural/model/package.hpp"
@@ -98,9 +99,13 @@ struct PresentProcessor::Impl {
     };
     struct ImageResources {
         Buffer input;
+        Buffer overlay;
+        VkQueryPool queries{};
+        bool submitted{};
         std::vector<Buffer> outputs;
         std::vector<VkDescriptorSet> descriptors;
-        std::array<VkCommandBuffer, 2> commands{};
+        std::array<VkCommandBuffer, 3> commands{};
+        VkFence download_fence{};
         VkSemaphore completion{VK_NULL_HANDLE};
         VkFence transfer_fence{VK_NULL_HANDLE};
     };
@@ -122,7 +127,12 @@ struct PresentProcessor::Impl {
     std::vector<Stage> stages;
     std::vector<ImageResources> image_resources;
     std::size_t base_stage_count{};
+    double gpu_ms{};
     bool neural_mode{};
+    bool external_mode{};
+    std::unique_ptr<neural::HostClient> host;
+    float host_strength{1.f};
+    bool host_logged{},host_failed{};
     bool temporal_mode{};
 #if defined(NEUROSHADE_LAYER_NEURAL)
     std::unique_ptr<neural::SpatialRuntime> neural_runtime;
@@ -147,19 +157,35 @@ struct PresentProcessor::Impl {
         : device(logical_device), dispatch(functions), extent(image_extent), format(image_format),
           byte_count(static_cast<VkDeviceSize>(extent.width) * extent.height * 4) {
         if (!dispatch.complete()) throw std::runtime_error("incomplete present dispatch");
-        if (images.empty() || pipeline.effects.empty()) {
+        if (images.empty() || (pipeline.effects.empty() && overlay_shader.empty())) {
             throw std::runtime_error("present pipeline has no images or effects");
         }
         neural_mode = pipeline.mode == runtime::PipelineMode::neural_spatial ||
                       pipeline.mode == runtime::PipelineMode::neural_temporal;
         temporal_mode = pipeline.mode == runtime::PipelineMode::neural_temporal;
+        external_mode=neural_mode && !temporal_mode;
+#if defined(NEUROSHADE_LAYER_NEURAL)
+        if(external_mode && sizeof(void*)==8) {
+            const auto loaded=neural::load_model_package(pipeline.effects.front().artifact);
+            if(loaded.valid() && loaded.package.manifest.runtime=="migraphx") external_mode=false;
+        }
+#endif
+        if(external_mode) {
+            if(pipeline.effects.empty() || pipeline.effects.front().backend!=runtime::EffectBackend::neural ||
+               std::count_if(pipeline.effects.begin(),pipeline.effects.end(),[](const auto& e){return e.backend==runtime::EffectBackend::neural;})!=1)
+                throw std::runtime_error("host64 requires one neural effect first, followed by shaders");
+            host=std::make_unique<neural::HostClient>(pipeline.effects.front().artifact,extent.width,extent.height);
+            host_strength=pipeline.effects.front().strength;
+            neural_mode=false;
+            nslog::write(nslog::Level::info,"host64_connected="+host->description());
+        }
         try {
             create_command_pool(queue_family);
             if (neural_mode) {
                 create_neural(pipeline, images, memory_properties);
             } else {
                 for (const auto& effect : pipeline.effects) {
-                    if (effect.backend != runtime::EffectBackend::shader) {
+                    if (effect.backend != runtime::EffectBackend::shader && !external_mode) {
                         throw std::runtime_error("mixed shader/neural present pipelines are unsupported");
                     }
                 }
@@ -167,8 +193,8 @@ struct PresentProcessor::Impl {
                                (pipeline.effects.size() + (overlay_shader.empty() ? 0U : 1U)));
                 create_stages(pipeline);
                 base_stage_count = stages.size();
-                if (!overlay_shader.empty()) create_stage(overlay_shader, 1.0F);
-                create_images(images, memory_properties, false);
+                if (!overlay_shader.empty()) create_stage(overlay_shader, (format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB) ? 1.0F : -1.0F);
+                create_images(images, memory_properties, external_mode);
                 update_descriptors();
                 record_commands(images);
             }
@@ -182,10 +208,11 @@ struct PresentProcessor::Impl {
         const VkDescriptorSetLayoutBinding bindings[] = {
             {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
             {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+            {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo descriptor_info{
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-        descriptor_info.bindingCount = 2;
+        descriptor_info.bindingCount = 3;
         descriptor_info.pBindings = bindings;
         check(dispatch.create_descriptor_set_layout(device, &descriptor_info, nullptr,
                                                      &descriptor_layout),
@@ -199,7 +226,7 @@ struct PresentProcessor::Impl {
         check(dispatch.create_pipeline_layout(device, &pipeline_info, nullptr, &pipeline_layout),
               "vkCreatePipelineLayout(present)");
         VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                       static_cast<std::uint32_t>(descriptor_count * 2)};
+                                       static_cast<std::uint32_t>(descriptor_count * 3)};
         VkDescriptorPoolCreateInfo pool_info{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
         pool_info.maxSets = static_cast<std::uint32_t>(descriptor_count);
         pool_info.poolSizeCount = 1;
@@ -242,6 +269,7 @@ struct PresentProcessor::Impl {
     void create_stages(const runtime::PipelinePreparation& pipeline) {
         stages.reserve(pipeline.effects.size() + 1);
         for (const auto& effect : pipeline.effects) {
+            if(external_mode && effect.backend==runtime::EffectBackend::neural) continue;
             create_stage(effect.artifact, effect.strength);
         }
     }
@@ -297,10 +325,11 @@ struct PresentProcessor::Impl {
         image_resources.resize(images.size());
         for (auto& resources : image_resources) {
             resources.input = create_buffer(properties, host_visible);
+            if (!neural_mode) resources.overlay = create_buffer(properties, true);
             const std::size_t output_count = neural_mode ? 1 : stages.size();
             resources.outputs.reserve(output_count);
             for (std::size_t index = 0; index < output_count; ++index) {
-                resources.outputs.push_back(create_buffer(properties, host_visible));
+                resources.outputs.push_back(create_buffer(properties, host_visible && neural_mode));
             }
             if (!neural_mode) {
                 resources.descriptors.resize(stages.size());
@@ -317,14 +346,31 @@ struct PresentProcessor::Impl {
             check(dispatch.create_semaphore(device, &semaphore_info, nullptr,
                                             &resources.completion),
                   "vkCreateSemaphore(present)");
-            if (host_visible) {
+            {
                 VkFenceCreateInfo fence_info{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                if (!neural_mode) fence_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
                 check(dispatch.create_fence(device, &fence_info, nullptr,
                                             &resources.transfer_fence),
                       "vkCreateFence(present neural)");
+                if (!neural_mode && dispatch.timestamp_bits && dispatch.timestamp_period > 0 &&
+                    dispatch.create_query_pool && dispatch.destroy_query_pool &&
+                    dispatch.cmd_reset_query_pool && dispatch.cmd_write_timestamp && dispatch.get_query_pool_results) {
+                    VkQueryPoolCreateInfo query{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+                    query.queryType = VK_QUERY_TYPE_TIMESTAMP;
+                    query.queryCount = 2;
+                    if (dispatch.create_query_pool(device, &query, nullptr, &resources.queries) != VK_SUCCESS)
+                        resources.queries = VK_NULL_HANDLE;
+                }
             }
         }
-        std::vector<VkCommandBuffer> commands(images.size() * 2);
+            if(external_mode) {
+                // Separate download completion from the final shader submission.
+                for(auto& resources:image_resources) {
+                    VkFenceCreateInfo fence{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+                    check(dispatch.create_fence(device,&fence,nullptr,&resources.download_fence),"vkCreateFence(host64)");
+                }
+            }
+        std::vector<VkCommandBuffer> commands(images.size() * 3);
         VkCommandBufferAllocateInfo command_info{
             VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
         command_info.commandPool = command_pool;
@@ -333,7 +379,7 @@ struct PresentProcessor::Impl {
         check(dispatch.allocate_command_buffers(device, &command_info, commands.data()),
               "vkAllocateCommandBuffers(present)");
         for (std::size_t index = 0; index < commands.size(); ++index) {
-            image_resources[index / 2].commands[index % 2] = commands[index];
+            image_resources[index / 3].commands[index % 3] = commands[index];
         }
     }
 
@@ -355,6 +401,8 @@ struct PresentProcessor::Impl {
             dispatch.cmd_copy_image_to_buffer(command, image,
                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                               buffer, 1, &copy);
+            buffer_barrier(command,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_HOST_READ_BIT,
+                           VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT);
             image_barrier(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                           VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_MEMORY_READ_BIT,
@@ -551,6 +599,7 @@ struct PresentProcessor::Impl {
                 const VkDescriptorBufferInfo input{source, 0, byte_count};
                 const VkDescriptorBufferInfo output{resources.outputs[index].handle, 0,
                                                      byte_count};
+                const VkDescriptorBufferInfo overlay{resources.overlay.handle, 0, byte_count};
                 const VkWriteDescriptorSet writes[] = {
                     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
                      resources.descriptors[index], 0, 0, 1,
@@ -558,8 +607,11 @@ struct PresentProcessor::Impl {
                     {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
                      resources.descriptors[index], 1, 0, 1,
                      VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &output, nullptr},
+                    {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, nullptr,
+                     resources.descriptors[index], 2, 0, 1,
+                     VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nullptr, &overlay, nullptr},
                 };
-                dispatch.update_descriptor_sets(device, 2, writes, 0, nullptr);
+                dispatch.update_descriptor_sets(device, 3, writes, 0, nullptr);
             }
         }
     }
@@ -600,15 +652,24 @@ struct PresentProcessor::Impl {
             begin.flags = VK_COMMAND_BUFFER_USAGE_SIMULTANEOUS_USE_BIT;
             check(dispatch.begin_command_buffer(command, &begin),
                   "vkBeginCommandBuffer(present)");
+            if (resources.queries) {
+                dispatch.cmd_reset_query_pool(command, resources.queries, 0, 2);
+                dispatch.cmd_write_timestamp(command, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, resources.queries, 0);
+            }
             image_barrier(command, image,
                           VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                           VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT,
                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
                           VK_PIPELINE_STAGE_TRANSFER_BIT);
+            if(!external_mode) {
             dispatch.cmd_copy_image_to_buffer(command, image,
                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                               resources.input.handle, 1, &copy);
+            } else {
+                buffer_barrier(command,VK_ACCESS_HOST_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,
+                    VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+            }
             buffer_barrier(command, VK_ACCESS_TRANSFER_WRITE_BIT,
                            VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -631,9 +692,9 @@ struct PresentProcessor::Impl {
                                    VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
                 }
             }
-            buffer_barrier(command, VK_ACCESS_SHADER_WRITE_BIT,
+            buffer_barrier(command, stage_count ? VK_ACCESS_SHADER_WRITE_BIT : VK_ACCESS_TRANSFER_WRITE_BIT,
                            VK_ACCESS_TRANSFER_READ_BIT,
-                           VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                           stage_count ? VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT : VK_PIPELINE_STAGE_TRANSFER_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT);
             image_barrier(command, image,
                           VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
@@ -641,7 +702,7 @@ struct PresentProcessor::Impl {
                           VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT,
                           VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
             dispatch.cmd_copy_buffer_to_image(command,
-                                              resources.outputs[stage_count - 1].handle,
+                                              stage_count ? resources.outputs[stage_count - 1].handle : resources.input.handle,
                                               image,
                                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &copy);
             image_barrier(command, image,
@@ -650,6 +711,8 @@ struct PresentProcessor::Impl {
                           VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_MEMORY_READ_BIT,
                           VK_PIPELINE_STAGE_TRANSFER_BIT,
                           VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+            if (resources.queries)
+                dispatch.cmd_write_timestamp(command, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, resources.queries, 1);
             check(dispatch.end_command_buffer(command),
                   "vkEndCommandBuffer(present)");
     }
@@ -661,6 +724,7 @@ struct PresentProcessor::Impl {
                            base_stage_count);
             record_command(resources.commands[1], images[image_index], resources,
                            stages.size());
+            if(external_mode) record_neural_transfer(resources.commands[2],images[image_index],resources.input.handle,true);
         }
     }
 
@@ -677,9 +741,12 @@ struct PresentProcessor::Impl {
             if (resources.completion) {
                 dispatch.destroy_semaphore(device, resources.completion, nullptr);
             }
+            if(resources.download_fence)dispatch.destroy_fence(device,resources.download_fence,nullptr);
             if (resources.transfer_fence) {
                 dispatch.destroy_fence(device, resources.transfer_fence, nullptr);
             }
+            if (resources.queries) dispatch.destroy_query_pool(device, resources.queries, nullptr);
+            destroy_buffer(resources.overlay);
             destroy_buffer(resources.input);
             for (auto& output : resources.outputs) destroy_buffer(output);
         }
@@ -724,7 +791,8 @@ VkResult PresentProcessor::submit(VkQueue queue, std::uint32_t image_index,
                                   std::uint32_t wait_count,
                                   const VkSemaphore* wait_semaphores,
                                   bool overlay_visible,
-                                  VkSemaphore& completion) noexcept {
+                                  VkSemaphore& completion,
+                                  const std::vector<std::uint32_t>* overlay_pixels) noexcept {
     completion = VK_NULL_HANDLE;
     if (image_index >= impl_->image_resources.size()) return VK_ERROR_UNKNOWN;
     if (wait_count > 16) return VK_ERROR_TOO_MANY_OBJECTS;
@@ -759,21 +827,64 @@ VkResult PresentProcessor::submit(VkQueue queue, std::uint32_t image_index,
         if (result == VK_SUCCESS) completion = resources.completion;
         return result;
     }
+    const VkResult waited = impl_->dispatch.wait_for_fences(impl_->device, 1,
+        &resources.transfer_fence, VK_TRUE, 5'000'000'000ULL);
+    if (waited != VK_SUCCESS) return waited;
+    if (resources.submitted && resources.queries) {
+        std::uint64_t times[2]{};
+        if (impl_->dispatch.get_query_pool_results(impl_->device, resources.queries, 0, 2,
+                sizeof(times), times, sizeof(std::uint64_t), VK_QUERY_RESULT_64_BIT) == VK_SUCCESS) {
+            const auto bits = impl_->dispatch.timestamp_bits;
+            const std::uint64_t mask = bits >= 64 ? ~std::uint64_t{0} : (std::uint64_t{1} << bits) - 1;
+            const double ms = ((times[1] - times[0]) & mask) * impl_->dispatch.timestamp_period / 1e6;
+            impl_->gpu_ms = impl_->gpu_ms == 0 ? ms : impl_->gpu_ms * 0.9 + ms * 0.1;
+        }
+    }
+    if(impl_->external_mode) {
+        auto result=impl_->dispatch.reset_fences(impl_->device,1,&resources.download_fence);
+        if(result!=VK_SUCCESS)return result;
+        VkSubmitInfo download{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        download.waitSemaphoreCount=wait_count;download.pWaitSemaphores=wait_semaphores;
+        download.pWaitDstStageMask=wait_count?wait_stages.data():nullptr;
+        download.commandBufferCount=1;download.pCommandBuffers=&resources.commands[2];
+        result=impl_->dispatch.queue_submit(queue,1,&download,resources.download_fence);
+        if(result!=VK_SUCCESS)return result;
+        result=impl_->dispatch.wait_for_fences(impl_->device,1,&resources.download_fence,VK_TRUE,5'000'000'000ULL);
+        if(result!=VK_SUCCESS)return result;
+        const bool bgra=impl_->format==VK_FORMAT_B8G8R8A8_UNORM || impl_->format==VK_FORMAT_B8G8R8A8_SRGB;
+        bool executed=impl_->host->process({static_cast<std::uint8_t*>(resources.input.mapped),static_cast<std::size_t>(impl_->byte_count)},
+            impl_->extent.width,impl_->extent.height,bgra,impl_->host_strength);
+        if((executed && !impl_->host_logged) || (!executed && !impl_->host_failed)) {
+            nslog::write(executed?nslog::Level::info:nslog::Level::warning,
+                executed?"neural_present=executed runtime=host64 inference_ms="+std::to_string(impl_->host->average_ms()):
+                         "neural_present=copy-fallback reason="+impl_->host->error());
+            impl_->host_logged=true;impl_->host_failed=!executed;
+        }
+    }
+    if (overlay_visible && resources.overlay.mapped) {
+        if (overlay_pixels && overlay_pixels->size() * sizeof(std::uint32_t) == impl_->byte_count)
+            std::memcpy(resources.overlay.mapped, overlay_pixels->data(), static_cast<std::size_t>(impl_->byte_count));
+        else std::memset(resources.overlay.mapped, 0, static_cast<std::size_t>(impl_->byte_count));
+    }
+    const VkResult reset = impl_->dispatch.reset_fences(impl_->device, 1, &resources.transfer_fence);
+    if (reset != VK_SUCCESS) return reset;
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
-    submit.waitSemaphoreCount = wait_count;
-    submit.pWaitSemaphores = wait_semaphores;
-    submit.pWaitDstStageMask = wait_count == 0 ? nullptr : wait_stages.data();
+    submit.waitSemaphoreCount = impl_->external_mode ? 0 : wait_count;
+    submit.pWaitSemaphores = impl_->external_mode ? nullptr : wait_semaphores;
+    submit.pWaitDstStageMask = submit.waitSemaphoreCount == 0 ? nullptr : wait_stages.data();
     submit.commandBufferCount = 1;
     const VkCommandBuffer command = resources.commands[overlay_visible ? 1 : 0];
     submit.pCommandBuffers = &command;
     submit.signalSemaphoreCount = 1;
     submit.pSignalSemaphores = &resources.completion;
-    const VkResult result = impl_->dispatch.queue_submit(queue, 1, &submit, VK_NULL_HANDLE);
+    const VkResult result = impl_->dispatch.queue_submit(queue, 1, &submit, resources.transfer_fence);
+    resources.submitted = result == VK_SUCCESS;
     if (result == VK_SUCCESS) completion = resources.completion;
     return result;
 }
 
 double PresentProcessor::average_ms() const noexcept {
+    if (!impl_->neural_mode) return impl_->gpu_ms;
 #if defined(NEUROSHADE_LAYER_TEMPORAL)
     return impl_->profiler ? impl_->profiler->avg_ms("present.neural") : 0.0;
 #else
@@ -782,11 +893,18 @@ double PresentProcessor::average_ms() const noexcept {
 }
 
 bool PresentProcessor::profiler_gpu_backed() const noexcept {
+    if (!impl_->neural_mode) return !impl_->image_resources.empty() && impl_->image_resources.front().queries;
 #if defined(NEUROSHADE_LAYER_TEMPORAL)
     return impl_->profiler && impl_->profiler->gpu_backed();
 #else
     return false;
 #endif
+}
+
+double PresentProcessor::inference_ms() const noexcept {return impl_->host?impl_->host->average_ms():0.0;}
+std::string PresentProcessor::runtime_status() const {
+    if(!impl_->host)return {};
+    return impl_->host_failed ? "FALHA: "+impl_->host->error() : impl_->host->description();
 }
 
 }  // namespace neuroshade::layer

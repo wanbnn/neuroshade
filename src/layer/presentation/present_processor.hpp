@@ -12,6 +12,13 @@
 namespace neuroshade::layer {
 
 struct PresentDispatch {
+    PFN_vkCreateQueryPool create_query_pool{};
+    PFN_vkDestroyQueryPool destroy_query_pool{};
+    PFN_vkCmdResetQueryPool cmd_reset_query_pool{};
+    PFN_vkCmdWriteTimestamp cmd_write_timestamp{};
+    PFN_vkGetQueryPoolResults get_query_pool_results{};
+    double timestamp_period{};
+    std::uint32_t timestamp_bits{};
     PFN_vkCreateBuffer create_buffer{};
     PFN_vkDestroyBuffer destroy_buffer{};
     PFN_vkGetBufferMemoryRequirements get_buffer_memory_requirements{};
@@ -72,9 +79,12 @@ public:
                                   std::uint32_t wait_count,
                                   const VkSemaphore* wait_semaphores,
                                   bool overlay_visible,
-                                  VkSemaphore& completion) noexcept;
+                                  VkSemaphore& completion,
+                                  const std::vector<std::uint32_t>* overlay_pixels = nullptr) noexcept;
     [[nodiscard]] double average_ms() const noexcept;
     [[nodiscard]] bool profiler_gpu_backed() const noexcept;
+    [[nodiscard]] double inference_ms() const noexcept;
+    [[nodiscard]] std::string runtime_status() const;
 
 private:
     struct Impl;

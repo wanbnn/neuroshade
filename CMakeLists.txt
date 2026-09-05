@@ -427,7 +427,9 @@ if(NS_BUILD_LAYER)
     add_library(neuroshade_layer SHARED
         src/layer/entrypoints/layer.cpp
         src/layer/presentation/present_processor.cpp
-        src/overlay/home_key_input.cpp)
+        src/overlay/home_key_input.cpp
+        src/overlay/runtime_ui.cpp
+        src/neural/runtime/host_client.cpp)
     if(TARGET neuroshade_shaders)
         add_dependencies(neuroshade_layer neuroshade_shaders)
     endif()
@@ -553,6 +555,10 @@ if(BUILD_TESTING)
             "${CMAKE_BINARY_DIR}/profile-schema-v2-roundtrip.json")
     set_tests_properties(profile.schema_v2_roundtrip PROPERTIES
         PASS_REGULAR_EXPRESSION "schema_v2_roundtrip=pass")
+
+    add_executable(ns-runtime-ui-tests tests/unit/runtime_ui_tests.cpp src/overlay/runtime_ui.cpp)
+    target_link_libraries(ns-runtime-ui-tests PRIVATE NeuroShade::common)
+    add_test(NAME runtime-ui COMMAND ns-runtime-ui-tests)
 
     add_executable(ns-overlay-tests tests/unit/overlay_tests.cpp)
     target_compile_features(ns-overlay-tests PRIVATE cxx_std_20)

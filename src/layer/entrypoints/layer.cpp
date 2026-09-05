@@ -4,6 +4,7 @@
 #include "layer/resource_tracker/resource_tracker.hpp"
 #include "overlay/home_key_input.hpp"
 #include "overlay/overlay_state.hpp"
+#include "overlay/runtime_ui.hpp"
 #include "profile/profile.hpp"
 #include "runtime/pipeline_plan.hpp"
 
@@ -49,6 +50,7 @@ template <typename Handle>
 }
 
 struct InstanceDispatch {
+    VkInstance handle{VK_NULL_HANDLE};
     PFN_vkGetInstanceProcAddr get_instance_proc_addr{};
     PFN_vkDestroyInstance destroy_instance{};
     PFN_vkEnumeratePhysicalDevices enumerate_physical_devices{};
@@ -87,6 +89,9 @@ struct DeviceDispatch {
     std::shared_ptr<std::mutex> overlay_mutex;
     std::shared_ptr<bool> overlay_resources_initialized;
     std::shared_ptr<const std::string> overlay_shader;
+    std::shared_ptr<neuroshade::overlay::RuntimeUi> ui;
+    std::vector<std::uint32_t> timestamp_bits;
+    PFN_vkQueueWaitIdle queue_wait_idle{};
 };
 
 struct SwapchainState {
@@ -197,6 +202,7 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateInstance(
     if (result != VK_SUCCESS) return result;
 
     InstanceDispatch dispatch{};
+    dispatch.handle=*instance;
     dispatch.get_instance_proc_addr = next_gipa;
     dispatch.destroy_instance = load_instance<PFN_vkDestroyInstance>(next_gipa, *instance, "vkDestroyInstance");
     dispatch.enumerate_physical_devices = load_instance<PFN_vkEnumeratePhysicalDevices>(
@@ -292,6 +298,22 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
         instance->get_memory_properties(physical_device, &dispatch.memory_properties);
     }
     auto& present = dispatch.present_dispatch;
+    dispatch.queue_wait_idle=load_device<PFN_vkQueueWaitIdle>(next_gdpa,*device,"vkQueueWaitIdle");
+    if (const auto instance=find_instance(physical_device)) {
+        auto properties=load_instance<PFN_vkGetPhysicalDeviceProperties>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceProperties");
+        auto queues=load_instance<PFN_vkGetPhysicalDeviceQueueFamilyProperties>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceQueueFamilyProperties");
+        if(properties) { VkPhysicalDeviceProperties p{}; properties(physical_device,&p); present.timestamp_period=p.limits.timestampPeriod; }
+        if(queues) {
+            std::uint32_t count{};queues(physical_device,&count,nullptr);
+            std::vector<VkQueueFamilyProperties> q(count);queues(physical_device,&count,q.data());
+            for(const auto& item:q) dispatch.timestamp_bits.push_back(item.timestampValidBits);
+        }
+    }
+    present.create_query_pool=load_device<PFN_vkCreateQueryPool>(next_gdpa,*device,"vkCreateQueryPool");
+    present.destroy_query_pool=load_device<PFN_vkDestroyQueryPool>(next_gdpa,*device,"vkDestroyQueryPool");
+    present.cmd_reset_query_pool=load_device<PFN_vkCmdResetQueryPool>(next_gdpa,*device,"vkCmdResetQueryPool");
+    present.cmd_write_timestamp=load_device<PFN_vkCmdWriteTimestamp>(next_gdpa,*device,"vkCmdWriteTimestamp");
+    present.get_query_pool_results=load_device<PFN_vkGetQueryPoolResults>(next_gdpa,*device,"vkGetQueryPoolResults");
     present.create_buffer = load_device<PFN_vkCreateBuffer>(next_gdpa, *device, "vkCreateBuffer");
     present.destroy_buffer = load_device<PFN_vkDestroyBuffer>(next_gdpa, *device, "vkDestroyBuffer");
     present.get_buffer_memory_requirements = load_device<PFN_vkGetBufferMemoryRequirements>(next_gdpa, *device, "vkGetBufferMemoryRequirements");
@@ -367,6 +389,12 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
                     (plugin_root.parent_path() / "shaders/overlay.spv").string());
                 neuroshade::overlay::Snapshot snapshot{};
                 snapshot.game = loaded.profile.executable;
+                if(const auto instance=find_instance(physical_device)) {
+                    auto properties=load_instance<PFN_vkGetPhysicalDeviceProperties>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceProperties");
+                    if(properties) {VkPhysicalDeviceProperties p{};properties(physical_device,&p);snapshot.gpu=p.deviceName;}
+                }
+                dispatch.ui=std::make_shared<neuroshade::overlay::RuntimeUi>(loaded.profile,profile_path,
+                    root_value ? std::filesystem::path(root_value) : std::filesystem::path("."));
                 snapshot.active_profile = profile_path;
                 snapshot.interop_mode = dispatch.pipeline->mode ==
                                                 neuroshade::runtime::PipelineMode::neural_spatial
@@ -564,7 +592,8 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateSwapchainKHR(
     VkSwapchainCreateInfoKHR effective = *create_info;
     bool processing_eligible = false;
     const bool processing_requested = dispatch->pipeline &&
-        (dispatch->pipeline->mode == neuroshade::runtime::PipelineMode::shader_only ||
+        (dispatch->pipeline->mode == neuroshade::runtime::PipelineMode::pass_through ||
+         dispatch->pipeline->mode == neuroshade::runtime::PipelineMode::shader_only ||
          dispatch->pipeline->mode == neuroshade::runtime::PipelineMode::neural_spatial ||
          dispatch->pipeline->mode == neuroshade::runtime::PipelineMode::neural_temporal) &&
         std::getenv("NEUROSHADE_ENABLED") != nullptr;
@@ -743,6 +772,9 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
                     found->second.processing_eligible) {
                     queue_family = family->second;
                     extent = found->second.extent;
+                    logical_device=found->second.device;
+                    format=found->second.format;
+                    images=found->second.images;
                     if (found->second.processing_queue_family == VK_QUEUE_FAMILY_IGNORED ||
                         found->second.processing_queue_family == queue_family) {
                         processor = found->second.processor;
@@ -759,12 +791,14 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
                     }
                 }
             }
+            auto present_dispatch=dispatch->present_dispatch;
+            if(queue_family<dispatch->timestamp_bits.size()) present_dispatch.timestamp_bits=dispatch->timestamp_bits[queue_family];
             if (initialize) {
                 std::string error;
                 auto created = neuroshade::layer::PresentProcessor::create(
                     logical_device,
                     dispatch->memory_properties, queue_family, extent, format, images,
-                    *dispatch->pipeline, dispatch->present_dispatch,
+                    *dispatch->pipeline, present_dispatch,
                     dispatch->overlay_shader ? *dispatch->overlay_shader : std::string{}, error);
                 if (created) {
                     processor = std::shared_ptr<neuroshade::layer::PresentProcessor>(
@@ -794,11 +828,54 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
                                      error);
                 }
             }
+            if (processor && dispatch->ui && dispatch->overlay && dispatch->overlay_mutex) {
+                std::scoped_lock ui_lock(*dispatch->overlay_mutex);
+                auto& ui=*dispatch->ui;
+                if(ui.apply_requested) {
+                    const char* root=std::getenv("NEUROSHADE_ROOT");
+                    auto candidate=neuroshade::runtime::prepare_pipeline(ui.draft,
+                        std::filesystem::path(root?root:".")/"share/neuroshade/plugins");
+                    std::string error;
+                    if(!candidate.valid()) error=candidate.errors.empty()?"perfil invalido":candidate.errors.front();
+                    else if(candidate.mode!=neuroshade::runtime::PipelineMode::shader_only &&
+                            candidate.mode!=neuroshade::runtime::PipelineMode::pass_through &&
+                            candidate.mode!=neuroshade::runtime::PipelineMode::neural_spatial)
+                        error="modelos temporais requerem recursos adicionais";
+                    else if(!dispatch->queue_wait_idle || dispatch->queue_wait_idle(queue)!=VK_SUCCESS)
+                        error="falha ao sincronizar GPU";
+                    else {
+                        auto created=neuroshade::layer::PresentProcessor::create(logical_device,
+                            dispatch->memory_properties,queue_family,extent,format,images,candidate,
+                            present_dispatch,dispatch->overlay_shader?*dispatch->overlay_shader:std::string{},error);
+                        if(created) {
+                            processor=std::shared_ptr<neuroshade::layer::PresentProcessor>(std::move(created));
+                            {
+                                std::scoped_lock state_lock(state_mutex);
+                                if(auto found=swapchains.find(swapchain);found!=swapchains.end()) found->second.processor=processor;
+                                if(auto found=device_dispatches.find(dispatch_key(queue));found!=device_dispatches.end())
+                                    found->second.pipeline=std::make_shared<const neuroshade::runtime::PipelinePreparation>(std::move(candidate));
+                            }
+                            auto snapshot=dispatch->overlay->snapshot();snapshot.passes.clear();
+                            for(const auto& e:ui.draft.pipeline) snapshot.passes.push_back({e.plugin,e.enabled,0,e.strength,e.model});
+                            dispatch->overlay->update(std::move(snapshot));
+                        }
+                    }
+                    ui.applied(error.empty(),error);
+                    nslog::write(error.empty()?nslog::Level::info:nslog::Level::warning,
+                        error.empty()?"overlay_apply=pass":"overlay_apply=fail reason="+error);
+                }
+                ui.runtime_metrics(processor->runtime_status(),processor->inference_ms());
+                ui.tick();
+                if(dispatch->home_key) dispatch->home_key->capture(overlay_visible);
+                if(overlay_visible) ui.draw(extent.width,extent.height,dispatch->overlay->snapshot(),
+                    dispatch->home_key?dispatch->home_key->take_events():std::vector<neuroshade::overlay::UiInput>{},
+                    dispatch->home_key && dispatch->home_key->mouse_captured(),processor->average_ms(),processor->profiler_gpu_backed());
+            }
             if (processor) {
                 const VkResult submitted = processor->submit(
                     queue, image_index, present_info->waitSemaphoreCount,
                     present_info->pWaitSemaphores,
-                    overlay_visible, completion);
+                    overlay_visible, completion, dispatch->ui?&dispatch->ui->pixels():nullptr);
                 if (submitted == VK_SUCCESS) {
                     effective = *present_info;
                     effective.waitSemaphoreCount = 1;

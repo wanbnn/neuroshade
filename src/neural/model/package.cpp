@@ -307,7 +307,13 @@ PackageResult load_model_package(const std::filesystem::path& path) {
         }
 
         if (manifest.schema != 1) throw std::runtime_error("unsupported model schema");
-        if (manifest.runtime != "migraphx") throw std::runtime_error("unsupported neural runtime");
+        if (manifest.runtime != "migraphx" && manifest.runtime != "pytorch" && manifest.runtime != "onnxruntime")
+            throw std::runtime_error("unsupported neural runtime");
+        if (manifest.runtime == "pytorch") {
+            const auto weights = std::filesystem::exists(path / "model.safetensors") ? path / "model.safetensors" : path / "model.pth";
+            contents.push_back(read_file(weights));
+            if (contents.back().empty()) throw std::runtime_error("PyTorch weights cannot be empty");
+        }
         if (manifest.id.empty() || manifest.name.empty() || manifest.version.empty()) {
             throw std::runtime_error("model identity fields cannot be empty");
         }
