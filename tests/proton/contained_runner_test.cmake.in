@@ -1,3 +1,13 @@
+# Containers and hosted runners may have no systemd user session. Report that
+# prerequisite as a skip; failures after the preflight remain test failures.
+find_program(systemd_run systemd-run)
+execute_process(COMMAND systemctl --user is-system-running
+    RESULT_VARIABLE user_manager_result OUTPUT_QUIET ERROR_QUIET)
+if(NOT systemd_run OR NOT user_manager_result STREQUAL "0")
+    message(STATUS "proton.contained_runner: SKIP (systemd user manager unavailable)")
+    return()
+endif()
+
 set(root "@CMAKE_BINARY_DIR@/contained-runner-test")
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${root}/prefix")

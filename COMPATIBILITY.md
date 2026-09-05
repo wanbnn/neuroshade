@@ -26,6 +26,7 @@ not a promise that every game is compatible.
 | 2026-09-04 | RX 9060 XT + Renoir iGPU, Bottles 67.2/ProtoSoda 11.0-1, DXVK 3.0.2 | Unreal Engine DX11 (`That One Otter Game`) | Incomplete: D3D11 feature level 11_1 and presentation were reached, but the run coincided with a forced host reboot and is not qualification evidence |
 | 2026-09-04 | RX 9060 XT, RADV 26.1.6 | Bottles 67.2/ProtoSoda 11.0-1 + DXVK 3.0.2 | deterministic DX11 window/swapchain/90-present fixture (`72aef406…16b1e`) with NeuroShade shader processing | Qualified |
 | 2026-09-04 | RX 9060 XT, RADV 26.1.6 | Bottles 67.2/ProtoSoda 11.0-1 + VKD3D-Proton 3.0.1 | deterministic DX12 queue/RTV/barrier/fence/90-present fixture (`3e696ba5…949b`) with NeuroShade shader processing | Qualified |
+| 2026-09-05 | RX 9060 XT, RADV 26.1.6 | Bottles 67.2/ProtoSoda 11.0-1 + DXVK 3.0.2 | PE64 DX9 window/90-present/device-reset fixture (`cf3427cc…fa89`) with NeuroShade shader processing | Qualified |
 
 The accepted Proton record is `build/m9-proton/final-qualification.json`
 (`qualified=yes`, DX11 exit 0, DX12 exit 0). Its adjacent logs contain the real
@@ -33,6 +34,12 @@ translator versions, the selected RX 9060 XT, and
 `present_processing=active backend=shader` from both executions. The fixtures
 are built reproducibly with llvm-mingw 20260826 and exit themselves after 90
 presents.
+
+The D3D9 addition is recorded in `build/d3d9-proton/qualification.json`
+(schema 2, `qualified=yes`, DX9/DX11/DX12 exit 0). A separate DX9 baseline
+without the layer also exited 0. The adjacent qualification logs confirm DXVK
+3.0.2, the RX 9060 XT, D3D9 device reset, and active NeuroShade shader
+processing. DX11/DX12 were rerun sequentially as regression checks.
 
 On multi-GPU Mesa systems, qualification must expose only the intended device.
 The RX 9060 XT test configuration uses `DRI_PRIME=1002:7590!`; translator logs
@@ -53,6 +60,13 @@ the layer regardless of this setting.
 
 ## Known constraints
 
+- D3D9 uses DXVK's `d3d9.dll` and the existing Vulkan presentation path.
+  The qualification tooling includes a PE64 D3D9 fixture with 90 presents and
+  a device reset. WineD3D/OpenGL, native Windows D3D9, D3D9Ex, exclusive
+  fullscreen, and lost-device recovery are not qualified by this fixture.
+- The shipped layer is x86_64. Traditional 32-bit Wine/Vulkan requires a
+  matching 32-bit layer, which is not shipped; 32-bit games through WoW64
+  require separate qualification.
 - The layer currently targets Vulkan and Vulkan translation layers. Native
   Windows D3D12 is outside v1 scope.
 - Automatic resource detection is heuristic. Profiles should persist manually

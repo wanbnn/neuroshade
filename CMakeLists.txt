@@ -528,8 +528,9 @@ if(BUILD_TESTING)
     add_executable(ns-pipeline-plan-tests tests/unit/pipeline_plan_tests.cpp)
     target_compile_features(ns-pipeline-plan-tests PRIVATE cxx_std_20)
     target_link_libraries(ns-pipeline-plan-tests PRIVATE NeuroShade::common)
-    if(TARGET neuroshade_models)
-        add_dependencies(ns-pipeline-plan-tests neuroshade_models)
+    if(TARGET neuroshade_temporal_sr_model)
+        add_dependencies(ns-pipeline-plan-tests neuroshade_temporal_sr_model)
+        target_compile_definitions(ns-pipeline-plan-tests PRIVATE NS_TEST_HAS_TEMPORAL_MODEL=1)
     endif()
     add_test(NAME unit.pipeline_plan COMMAND ns-pipeline-plan-tests
         "${CMAKE_CURRENT_SOURCE_DIR}/tests/data/m2-profile.json"
@@ -583,7 +584,8 @@ if(BUILD_TESTING)
             "${CMAKE_BINARY_DIR}/contained_runner_test.cmake" @ONLY)
         add_test(NAME proton.contained_runner
             COMMAND ${CMAKE_COMMAND} -P "${CMAKE_BINARY_DIR}/contained_runner_test.cmake")
-        set_tests_properties(proton.contained_runner PROPERTIES TIMEOUT 30)
+        set_tests_properties(proton.contained_runner PROPERTIES
+            TIMEOUT 30 SKIP_REGULAR_EXPRESSION "proton.contained_runner: SKIP")
 
         configure_file(tests/integration/session_log_test.cmake.in
             "${CMAKE_BINARY_DIR}/session_log_test.cmake" @ONLY)

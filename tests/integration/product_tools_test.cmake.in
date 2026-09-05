@@ -61,10 +61,13 @@ if("@NS_MIGRAPHX_AVAILABLE@" STREQUAL "ON" AND "@NS_BUILD_HIP_INTEROP@" STREQUAL
     endif()
 endif()
 
+# Game/profile management must work in shader-only installations too.
+configure_file("@CMAKE_SOURCE_DIR@/tests/data/m2-profile.json"
+    "${home}/shader-profile.json" COPYONLY)
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
             "${prefix}/bin/neuroshade" game add /games/example.exe
-            "${prefix}/share/neuroshade/profiles/examples/temporal_sr_2x.json"
+            "${home}/shader-profile.json"
     RESULT_VARIABLE game_add_result OUTPUT_VARIABLE game_add_output ERROR_VARIABLE game_add_error)
 execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
@@ -78,7 +81,7 @@ execute_process(
     COMMAND "${CMAKE_COMMAND}" -E env ${product_env}
             "${prefix}/bin/neuroshade" profile show /games/example.exe
     RESULT_VARIABLE profile_show_result OUTPUT_VARIABLE profile_show_output ERROR_VARIABLE profile_show_error)
-if(NOT profile_show_result EQUAL 0 OR NOT profile_show_output MATCHES "temporal_sr_2x")
+if(NOT profile_show_result EQUAL 0 OR NOT profile_show_output MATCHES "org.neuroshade.sharpen")
     message(FATAL_ERROR "profile show failed: ${profile_show_output} ${profile_show_error}")
 endif()
 

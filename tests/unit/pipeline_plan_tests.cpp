@@ -33,11 +33,16 @@ int main(int argc, char** argv) {
         const auto temporal_profile = neuroshade::profile::load(argv[2]);
         require(temporal_profile.valid(), "temporal profile did not load");
         const auto temporal = neuroshade::runtime::prepare_pipeline(temporal_profile.profile, argv[3]);
+#ifdef NS_TEST_HAS_TEMPORAL_MODEL
         require(temporal.valid(), "temporal pipeline did not prepare");
         require(temporal.mode == neuroshade::runtime::PipelineMode::neural_temporal,
                 "temporal mode was not selected");
         require(temporal.plan.passes.size() == 1 && temporal.effects.front().artifact.ends_with(".nsmodel"),
                 "temporal model was not resolved");
+#else
+        require(!temporal.valid() && temporal.mode == neuroshade::runtime::PipelineMode::pass_through,
+                "missing temporal model did not preserve pass-through");
+#endif
 
         neuroshade::profile::Profile invalid;
         invalid.pipeline.push_back({"org.neuroshade.missing", true, 1.0F, {}, {}});

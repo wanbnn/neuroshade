@@ -1,8 +1,10 @@
 set(root "@CMAKE_BINARY_DIR@/proton-harness-test")
 file(REMOVE_RECURSE "${root}")
 file(MAKE_DIRECTORY "${root}/home")
-foreach(api IN ITEMS dx11 dx12)
-    if(api STREQUAL "dx11")
+foreach(api IN ITEMS dx9 dx11 dx12)
+    if(api STREQUAL "dx9")
+        set(translator "DXVK D3D9")
+    elseif(api STREQUAL "dx11")
         set(translator "DXVK")
     else()
         set(translator "VKD3D-Proton")
@@ -21,12 +23,16 @@ execute_process(
         "VKD3D_PROTON_VERSION=test-vkd3d"
         "NEUROSHADE_EXPECTED_GPU=Test GPU"
         /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/qualify-proton.sh"
+        --dx9-launcher "${root}/dx9.sh"
         --dx11-launcher "${root}/dx11.sh"
         --dx12-launcher "${root}/dx12.sh"
         --output "${root}/qualification.json"
     RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
 if(NOT result EQUAL 0 OR NOT output MATCHES "\"qualified\":\"yes\"" OR
-   NOT output MATCHES "test-dxvk" OR NOT output MATCHES "test-vkd3d")
+   NOT output MATCHES "test-dxvk" OR NOT output MATCHES "test-vkd3d" OR
+   NOT output MATCHES "\"dx9_evidence\":\"yes\"" OR
+   NOT output MATCHES "\"dx9_layer_evidence\":\"yes\"" OR
+   NOT output MATCHES "\"dx9_exit\":0")
     message(FATAL_ERROR "Proton qualification harness failed: ${output} ${error}")
 endif()
 
@@ -37,14 +43,56 @@ execute_process(
         "HOME=${root}/home"
         "NEUROSHADE_RUN=@CMAKE_BINARY_DIR@/bin/neuroshade-run"
         /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/qualify-proton.sh"
+        --dx9-launcher "${root}/no-evidence.sh"
         --dx11-launcher "${root}/no-evidence.sh"
         --dx12-launcher "${root}/no-evidence.sh"
         --output "${root}/no-evidence.json"
     RESULT_VARIABLE no_evidence_result OUTPUT_VARIABLE no_evidence_output ERROR_VARIABLE no_evidence_error)
 if(no_evidence_result EQUAL 0 OR NOT no_evidence_output MATCHES "\"qualified\":\"no\"" OR
+   NOT no_evidence_output MATCHES "\"dx9_evidence\":\"no\"" OR
    NOT no_evidence_output MATCHES "\"dx11_evidence\":\"no\"" OR
    NOT no_evidence_output MATCHES "\"dx12_evidence\":\"no\"" OR
    NOT no_evidence_output MATCHES "\"dx11_layer_evidence\":\"no\"")
     message(FATAL_ERROR "translator evidence gate failed: ${no_evidence_output} ${no_evidence_error}")
 endif()
+# D3D11's DXVK log alone must not qualify D3D9. Exercise each independent
+# D3D9 gate with otherwise successful DX11/DX12 launchers.
+foreach(failure IN ITEMS wrong-api no-layer wrong-gpu exit-failure timeout)
+    set(evidence "DXVK D3D9 gpu=Test GPU present_processing=active backend=shader")
+    set(ending "exit 0")
+    if(failure STREQUAL "wrong-api")
+        set(evidence "DXVK D3D11 gpu=Test GPU present_processing=active backend=shader")
+    elseif(failure STREQUAL "no-layer")
+        set(evidence "DXVK D3D9 gpu=Test GPU")
+    elseif(failure STREQUAL "wrong-gpu")
+        set(evidence "DXVK D3D9 gpu=Other GPU present_processing=active backend=shader")
+    elseif(failure STREQUAL "exit-failure")
+        set(ending "exit 13")
+    elseif(failure STREQUAL "timeout")
+        set(ending "exec sleep 5")
+    endif()
+    file(WRITE "${root}/failure.sh" "#!/bin/sh\necho '${evidence}'\n${ending}\n")
+    execute_process(COMMAND chmod 755 "${root}/failure.sh")
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env
+            "HOME=${root}/home"
+            "NEUROSHADE_RUN=@CMAKE_BINARY_DIR@/bin/neuroshade-run"
+            "NEUROSHADE_EXPECTED_GPU=Test GPU"
+            "NEUROSHADE_PROTON_TIMEOUT=1"
+            "NEUROSHADE_PROTON_CONTINUE_AFTER_FAILURE=0"
+            /bin/sh "@CMAKE_SOURCE_DIR@/tests/proton/qualify-proton.sh"
+            --dx9-launcher "${root}/failure.sh"
+            --dx11-launcher "${root}/dx11.sh"
+            --dx12-launcher "${root}/dx12.sh"
+            --output "${root}/${failure}.json"
+        RESULT_VARIABLE result OUTPUT_VARIABLE output ERROR_VARIABLE error)
+    if(result EQUAL 0 OR NOT output MATCHES "\"qualified\":\"no\"")
+        message(FATAL_ERROR "D3D9 ${failure} gate failed: ${output} ${error}")
+    endif()
+    if(failure STREQUAL "exit-failure" OR failure STREQUAL "timeout")
+        if(NOT output MATCHES "\"dx11_exit\":125" OR NOT output MATCHES "\"dx12_exit\":125")
+            message(FATAL_ERROR "D3D9 ${failure} did not stop subsequent workloads: ${output}")
+        endif()
+    endif()
+endforeach()
 message(STATUS "proton.harness_contract: PASS evidence_required=yes (synthetic; not a DX qualification)")

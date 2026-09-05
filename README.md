@@ -9,6 +9,7 @@ NeuroShade is an AMD-only Vulkan post-processing and neural-rendering runtime fo
 - a C++20 compiler
 - GTK4 development files for the native desktop frontend (Zenity is used as a fallback)
 - Vulkan loader, headers, and a Vulkan 1.2-capable driver
+- `glslc` (Shaderc) to compile bundled SPIR-V shaders; on Ubuntu install `glslc`
 - ROCm/HIP 7.x and its Clang compiler are required when `NS_BUILD_HIP_INTEROP=ON`
 - MIGraphX is optional at configure time and required for the M5 runtime target; use `NS_MIGRAPHX_ROOT` for a non-system installation
 - `.pth` import additionally requires a separate Python environment containing PyTorch, ONNX, NumPy, and ONNX Runtime; set `NEUROSHADE_PYTHON=/path/to/python` when it is not the default `python3`
@@ -79,6 +80,13 @@ Use `neuroshade launch <command...>` or the Steam launch option
 `neuroshade-run %command%`. Registered profiles are recovered automatically by
 exact executable identity. Session logs are written under
 `$XDG_STATE_HOME/neuroshade` (normally `~/.local/state/neuroshade`).
+
+Direct3D 9 and 11 games/applications use DXVK; Direct3D 12 uses VKD3D-Proton.
+Enable DXVK in the Proton/Wine/Bottles environment, then use the same
+`neuroshade-run` launcher and shader profiles. D3D9 requires DXVK's `d3d9.dll`
+and a native DLL override; WineD3D's OpenGL path does not reach this Vulkan
+layer. See [Proton qualification](tests/proton/README.md) for the D3D9 fixture
+and [compatibility](COMPATIBILITY.md) for tested architectures and limits.
 
 Run the M9 reliability gates sequentially (the safe default) with:
 

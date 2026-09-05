@@ -14,12 +14,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build g++ libvulkan-dev mesa-vulkan-drivers vulkan-tools vulkan-validationlayers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++ glslc \
+            libvulkan-dev mesa-vulkan-drivers vulkan-tools vulkan-validationlayers \
+            python3 python3-numpy python3-onnx
       - name: Configure
         run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} -DNS_BUILD_TESTBED=ON -DNS_BUILD_HIP_INTEROP=OFF -DNS_BUILD_NEURAL=OFF -DBUILD_TESTING=ON
       - name: Build
         run: cmake --build build --parallel
       - name: Test
-        env:
-          VK_ICD_FILENAMES: /usr/share/vulkan/icd.d/lvp_icd.x86_64.json
-        run: ctest --test-dir build --output-on-failure
+        run: |
+          # Mesa packages use either the architecture-qualified or generic name.
+          if [ -r /usr/share/vulkan/icd.d/lvp_icd.x86_64.json ]; then
+            export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.x86_64.json
+          else
+            export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+          fi
+          test -r "$VK_ICD_FILENAMES"
+          ctest --test-dir build --output-on-failure

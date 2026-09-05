@@ -38,7 +38,8 @@ endif()
 file(GLOB package_root "${root}/NeuroShade-*-linux-x86_64")
 if(NOT EXISTS "${package_root}/install.sh" OR NOT EXISTS "${package_root}/uninstall.sh" OR
    NOT EXISTS "${package_root}/SHA256SUMS" OR
-   NOT EXISTS "${package_root}/payload/bin/neuroshade")
+   NOT EXISTS "${package_root}/payload/bin/neuroshade" OR
+   NOT EXISTS "${package_root}/payload/share/neuroshade/qualification/windows/dx9_smoke.cpp")
     message(FATAL_ERROR "portable archive is incomplete")
 endif()
 

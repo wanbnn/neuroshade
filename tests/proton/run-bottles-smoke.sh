@@ -20,7 +20,7 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-case "$api" in dx11|dx12) ;; *) echo "--api must be dx11 or dx12" >&2; exit 64;; esac
+case "$api" in dx9|dx11|dx12) ;; *) echo "--api must be dx9, dx11 or dx12" >&2; exit 64;; esac
 [ -f "$workload" ] || { echo "workload not found: $workload" >&2; exit 66; }
 [ -d "$prefix" ] || { echo "prefix not found: $prefix" >&2; exit 66; }
 [ -x "$prefix/standalone" ] || { echo "Bottles standalone wrapper not found" >&2; exit 66; }
@@ -48,10 +48,13 @@ set +e
         export NEUROSHADE_PROFILE="$8"
         export NEUROSHADE_LOG="$9"
         export NEUROSHADE_ENABLED=1
-        if [ "$4" = dx11 ]; then
+        if [ "$4" = dx9 ] || [ "$4" = dx11 ]; then
             export DXVK_FILTER_DEVICE_NAME="RX 9060 XT"
             export DXVK_LOG_LEVEL=info
             export DXVK_LOG_PATH="$3"
+            if [ "$4" = dx9 ]; then
+                export WINEDLLOVERRIDES="${WINEDLLOVERRIDES:+$WINEDLLOVERRIDES;}d3d9=n"
+            fi
         else
             export VKD3D_FILTER_DEVICE_NAME="RX 9060 XT"
             export VKD3D_DEBUG=info
@@ -67,7 +70,11 @@ set +e
 result=$?
 set -e
 
-if [ "$api" = dx11 ]; then
+if [ "$api" = dx9 ]; then
+    for log in "$log_dir"/*_d3d9.log; do
+        [ ! -r "$log" ] || cat "$log"
+    done
+elif [ "$api" = dx11 ]; then
     for log in "$log_dir"/*_dxgi.log "$log_dir"/*_d3d11.log; do
         [ -r "$log" ] && cat "$log"
     done
