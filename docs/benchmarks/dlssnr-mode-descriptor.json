@@ -1,0 +1,26 @@
+{
+  "sha256": "dcc0dc2414aedec4a8e084647070383be068554042587180c20c784d4772d36f",
+  "weight_name": "CC_Control_History_Blend_Quantize_With_Teacher_honest_tench_2026_07_04_22_30_weights",
+  "weight_presets": [
+    1
+  ],
+  "requested_to_effective_preset": {
+    "0": 1,
+    "1": 1,
+    "2": 1,
+    "3": 1
+  },
+  "style_count": 3,
+  "style_conditioning_scale": 0.0078125,
+  "style_labels": [
+    "Default",
+    "Natural",
+    "Cinematic"
+  ],
+  "evidence": {
+    "style_count": "descriptor+0x24 -> 180021235 -> record+0x64",
+    "style_value": "1800224e7..180022505: unsigned clamp, float conversion, scale",
+    "preset_fallback": "180023a40..180023aba: lookup, fallback to preset 1"
+  },
+  "intensity_formula_proven_from_this_inspection": false
+}

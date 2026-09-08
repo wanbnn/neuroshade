@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <array>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -31,6 +32,10 @@ struct Effect {
     // a profile-schema-v2 roundtrip test that proves the data flows through
     // save() / parse() unchanged.
     std::vector<ResourceBinding> resource_bindings;
+    std::array<float,3> nr_controls{0.f,1.f,1.f}; // Local tone, local structure, skin structure.
+    bool nr_auto_mask{true};
+    unsigned nr_style{0},nr_preset{0};
+    float nr_intensity{1.f};
 };
 
 struct Profile {

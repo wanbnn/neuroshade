@@ -55,11 +55,14 @@ def serve(path:Path,config_path:Path,ready=None):
                 micros=0
                 try:
                     if op==3:
-                        body=json.dumps({'version':VERSION,'engines':['pytorch','onnxruntime'],'pid':os.getpid()}).encode()
+                        body=json.dumps({'version':VERSION,'engines':['pytorch','onnxruntime','dlssnr_hip'],'pid':os.getpid()}).encode()
                     elif op==1:
                         config=json.loads(config_path.read_text()) if config_path.is_file() else {}
                         model=Path(payload.decode()).resolve()
                         key=(str(model), (model/'manifest.json').stat().st_mtime_ns,json.dumps(config,sort_keys=True))
+                        # Native graphs own internal recurrent buffers: never share across peers.
+                        if json.loads((model/'manifest.json').read_text()).get('runtime') == 'dlssnr_hip':
+                            key=key+(object(),)
                         with lock:
                             if key not in cache:
                                 # Drop old engines before loading a new large model.
@@ -71,6 +74,7 @@ def serve(path:Path,config_path:Path,ready=None):
                                 warm_key=(id(engine),w,h)
                                 if warm_key not in warmed:
                                     process_frame(engine,bytes(w*h*4),w,h,False,config)
+                                    if hasattr(engine,'reset'): engine.reset()
                                     warmed.add(warm_key)
                         body=json.dumps(engine.info).encode()
                         print('model=loaded '+body.decode(),flush=True)
@@ -85,7 +89,14 @@ def serve(path:Path,config_path:Path,ready=None):
                     peer.sendall(HEADER.pack(MAGIC,VERSION,1,0,0,0,len(body),0)+body)
         except (EOFError,ConnectionError,TimeoutError,OSError,ValueError) as error:
             if not isinstance(error,EOFError): print('client_closed='+str(error),flush=True)
-        finally: peer.close();slots.release()
+        finally:
+            with lock:
+                if engine is not None and hasattr(engine,'close'):
+                    engine.close()
+                    for key in list(cache):
+                        if cache[key] is engine: del cache[key]
+                    warmed.difference_update({k for k in warmed if k[0]==id(engine)})
+            peer.close();slots.release()
     try:
         while True:
             peer,_=server.accept()

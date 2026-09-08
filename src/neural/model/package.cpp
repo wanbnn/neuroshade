@@ -265,12 +265,15 @@ PackageResult load_model_package(const std::filesystem::path& path) {
         if (!std::filesystem::is_directory(path) || path.extension() != ".nsmodel") {
             throw std::runtime_error(".nsmodel package must be a directory with .nsmodel extension");
         }
-        constexpr std::array required_files{"manifest.json", "model.onnx", "signature.json",
+        const auto manifest_text = read_file(path / "manifest.json");
+        const auto manifest_root = object(JsonParser(manifest_text).parse(), "manifest");
+        const bool native = text(manifest_root, "runtime") == "dlssnr_hip";
+        const std::array required_files{"manifest.json", native ? "graph.bin" : "model.onnx", "signature.json",
                                              "metadata.json", "preview.webp"};
         std::vector<std::string> contents;
         contents.reserve(required_files.size());
         for (const auto* filename : required_files) contents.push_back(read_file(path / filename));
-        if (contents[1].empty()) throw std::runtime_error("model.onnx cannot be empty");
+        if (contents[1].empty()) throw std::runtime_error("model graph cannot be empty");
         const auto signature = object(JsonParser(contents[2]).parse(), "signature");
         const auto metadata = object(JsonParser(contents[3]).parse(), "metadata");
         if (unsigned_number(signature, "schema") != 1 || unsigned_number(metadata, "schema") != 1) {
@@ -307,8 +310,14 @@ PackageResult load_model_package(const std::filesystem::path& path) {
         }
 
         if (manifest.schema != 1) throw std::runtime_error("unsupported model schema");
-        if (manifest.runtime != "migraphx" && manifest.runtime != "pytorch" && manifest.runtime != "onnxruntime")
+        if (manifest.runtime != "migraphx" && manifest.runtime != "pytorch" && manifest.runtime != "onnxruntime" && manifest.runtime != "dlssnr_hip")
             throw std::runtime_error("unsupported neural runtime");
+        if (native) {
+            for (const auto* name : {"weights.bin", "kernels.hsaco", "lookup.bin"}) {
+                contents.push_back(read_file(path / name));
+                if (contents.back().empty()) throw std::runtime_error("native artifact cannot be empty");
+            }
+        }
         if (manifest.runtime == "pytorch") {
             const auto weights = std::filesystem::exists(path / "model.safetensors") ? path / "model.safetensors" : path / "model.pth";
             contents.push_back(read_file(weights));

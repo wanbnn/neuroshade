@@ -5,6 +5,7 @@
 #include <chrono>
 #include <filesystem>
 #include <vector>
+#include <map>
 #include <cstdint>
 
 namespace neuroshade::overlay {
@@ -28,6 +29,8 @@ private:
     profile::Profile defaults_;
     std::vector<std::filesystem::path> presets_,models_;
     std::vector<Gpu> gpus_;
+    std::map<std::string,bool> native_models_;
+    int native_effect();
     std::vector<Button> buttons_;
     std::vector<std::uint32_t> pixels_;
     std::vector<double> history_;
@@ -40,7 +43,7 @@ private:
     bool dirty_{}, show_fps_{true}, show_profiler_{true};
     double inference_ms_{};
     std::string runtime_;
-    std::string status_{"Pronto. Home abre/fecha; F1-F7 muda de pagina."};
+    std::string status_{"Pronto. Home abre/fecha; F1-F8 muda de pagina."};
     void scan();
     void sample_gpus();
     void action(int id);

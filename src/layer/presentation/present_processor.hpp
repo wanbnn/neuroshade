@@ -12,6 +12,8 @@
 namespace neuroshade::layer {
 
 struct PresentDispatch {
+    PFN_vkGetMemoryFdKHR get_memory_fd{};
+    unsigned char device_pci[VK_UUID_SIZE]{};
     PFN_vkCreateQueryPool create_query_pool{};
     PFN_vkDestroyQueryPool destroy_query_pool{};
     PFN_vkCmdResetQueryPool cmd_reset_query_pool{};
@@ -81,6 +83,7 @@ public:
                                   bool overlay_visible,
                                   VkSemaphore& completion,
                                   const std::vector<std::uint32_t>* overlay_pixels = nullptr) noexcept;
+    bool update_nr(const runtime::PipelinePreparation& pipeline,std::string& error);
     [[nodiscard]] double average_ms() const noexcept;
     [[nodiscard]] bool profiler_gpu_backed() const noexcept;
     [[nodiscard]] double inference_ms() const noexcept;

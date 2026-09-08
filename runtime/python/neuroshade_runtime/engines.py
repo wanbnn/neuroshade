@@ -24,8 +24,11 @@ def load_manifest(path: Path) -> dict:
     if scale['x'] != scale['y'] or not 1 <= scale['x'] <= 8 or int(scale['x']) != scale['x']:
         raise ValueError('supported image scales are integer 1x through 8x')
     metadata = json.loads((path / 'metadata.json').read_text())
+    if manifest.get('runtime') == 'dlssnr_hip' and set(metadata.get('sha256', {})) != {'kernels.hsaco','graph.bin','weights.bin','lookup.bin'}:
+        raise ValueError('native model requires all artifact checksums')
     for name, digest in metadata.get('sha256', {}).items():
-        if name not in ('model.onnx','model.pth','model.safetensors'):
+        allowed = ('kernels.hsaco','graph.bin','weights.bin','lookup.bin') if manifest.get('runtime') == 'dlssnr_hip' else ('model.onnx','model.pth','model.safetensors')
+        if name not in allowed:
             raise ValueError('unrecognized model artifact in hash table')
         if hashlib.sha256((path / name).read_bytes()).hexdigest() != digest:
             raise ValueError(f'artifact checksum mismatch: {name}')
@@ -161,7 +164,12 @@ class OnnxEngine:
 def create_engine(path:Path,config:dict):
     manifest=load_manifest(path)
     backend=config.get('backend','auto')
-    if backend=='auto': backend='pytorch' if manifest['runtime']=='pytorch' else 'onnxruntime'
+    if backend=='auto': backend=manifest['runtime'] if manifest['runtime'] in ('pytorch','dlssnr_hip') else 'onnxruntime'
+    if backend=='dlssnr_hip':
+        if manifest['runtime'] != 'dlssnr_hip': raise ValueError('native backend requires a native package')
+        from .dlssnr import DlssnrEngine
+        return DlssnrEngine(path,manifest,config)
+    if manifest['runtime']=='dlssnr_hip': raise ValueError('native model requires backend=auto or dlssnr_hip')
     if backend=='pytorch': return TorchEngine(path,manifest,config)
     if backend=='onnxruntime': return OnnxEngine(path,manifest,config)
     raise ValueError('unknown host64 backend: '+backend)
@@ -171,6 +179,10 @@ def process_frame(engine,raw:bytes,width:int,height:int,bgra:bool,config:dict):
     if not 1<=width<=4096 or not 1<=height<=4096 or len(raw)!=width*height*4:
         raise ValueError('frame dimensions/payload invalid')
     started=time.perf_counter()
+    if hasattr(engine,'process_rgba'):
+        body=engine.process_rgba(raw,width,height,bgra)
+        if len(body)!=len(raw): raise ValueError('native output size mismatch')
+        return body,(time.perf_counter()-started)*1000
     source=np.frombuffer(raw,dtype=np.uint8).reshape(height,width,4)
     rgba=source[:,:,[2,1,0,3]] if bgra else source
     rgb=engine.run(rgba,width,height,config.get('input_mode','reconstruct'))

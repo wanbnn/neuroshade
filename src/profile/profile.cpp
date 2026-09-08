@@ -1,3 +1,6 @@
+#include <tuple>
+#include <cmath>
+#include <stdexcept>
 #include "profile/profile.hpp"
 
 #include <algorithm>
@@ -178,6 +181,28 @@ Effect parse_effect_v2(std::string_view obj) {
             effect.model = std::string(strip_quotes(value));
         }
     }
+    const char* controls[]={"nr_local_tone","nr_local_structure","nr_skin_structure"};
+    for(unsigned i=0;i<3;++i)if(const auto value=field_value(obj,controls[i])){
+        const auto number=parse_double(*value);
+        if(!number||!std::isfinite(*number)||*number<(i==2?-1:0)||*number>2)throw std::runtime_error("NR tone/structure must be in [0,2], skin in [-1,2]");
+        effect.nr_controls[i]=static_cast<float>(*number);
+    }
+    if(const auto value=field_value(obj,"nr_auto_mask")){
+        const auto flag=parse_bool(*value);if(!flag)throw std::runtime_error("nr_auto_mask must be boolean");
+        effect.nr_auto_mask=*flag;
+    }
+    for(auto [name,target,limit]:{std::tuple{"nr_style",&effect.nr_style,2u},std::tuple{"nr_preset",&effect.nr_preset,3u}}){
+        if(const auto value=field_value(obj,name)){
+            const auto number=parse_double(*value);
+            if(!number||!std::isfinite(*number)||*number<0||*number>limit||std::floor(*number)!=*number)throw std::runtime_error("invalid NR selection");
+            *target=static_cast<unsigned>(*number);
+        }
+    }
+    if(const auto value=field_value(obj,"nr_intensity")){
+        const auto number=parse_double(*value);
+        if(!number||!std::isfinite(*number)||*number<0||*number>2)throw std::runtime_error("NR intensity must be in [0,2]");
+        effect.nr_intensity=static_cast<float>(*number);
+    }
     parse_resource_bindings(obj, effect);
     return effect;
 }
@@ -241,7 +266,8 @@ LoadResult parse(std::string_view json) {
     parse_output_extent(source, result.profile);
 
     if (result.profile.schema_version == 2) {
-        parse_pipeline_v2(source, result.profile.pipeline);
+        try{parse_pipeline_v2(source, result.profile.pipeline);}
+        catch(const std::exception& e){result.errors.push_back(e.what());}
     } else {
         const std::regex effect_re(
             R"re(\{\s*"plugin"\s*:\s*"([^"]+)"\s*,\s*"enabled"\s*:\s*(true|false)\s*,\s*"strength"\s*:\s*([-+]?[0-9]*\.?[0-9]+)\s*\})re");
@@ -266,6 +292,12 @@ LoadResult load(const std::filesystem::path& path) {
 }
 
 bool save(const Profile& profile, const std::filesystem::path& path, std::string& error) {
+    for(const auto& effect:profile.pipeline)for(unsigned i=0;i<3;++i){
+        const float value=effect.nr_controls[i];
+        if(!std::isfinite(value)||value<(i==2?-1:0)||value>2){error="NR tone/structure must be in [0,2], skin in [-1,2]";return false;}
+    }
+    for(const auto& effect:profile.pipeline)
+        if(effect.nr_style>2||effect.nr_preset>3||!std::isfinite(effect.nr_intensity)||effect.nr_intensity<0||effect.nr_intensity>2){error="invalid NR selection or intensity";return false;}
     std::error_code filesystem_error;
     if (!path.parent_path().empty()) std::filesystem::create_directories(path.parent_path(), filesystem_error);
     if (filesystem_error) {
@@ -288,6 +320,7 @@ bool save(const Profile& profile, const std::filesystem::path& path, std::string
         stream << "    {\"plugin\": \"" << escape(effect.plugin) << "\", \"enabled\": "
                << (effect.enabled ? "true" : "false") << ", \"strength\": " << effect.strength;
         if (!effect.model.empty()) stream << ", \"model\": \"" << escape(effect.model) << "\"";
+        if(!effect.model.empty())stream<<", \"nr_local_tone\": "<<effect.nr_controls[0]<<", \"nr_local_structure\": "<<effect.nr_controls[1]<<", \"nr_skin_structure\": "<<effect.nr_controls[2]<<", \"nr_auto_mask\": "<<(effect.nr_auto_mask?"true":"false")<<", \"nr_style\": "<<effect.nr_style<<", \"nr_preset\": "<<effect.nr_preset<<", \"nr_intensity\": "<<effect.nr_intensity;
         if (!effect.resource_bindings.empty()) {
             stream << ", \"resource_bindings\": [";
             for (std::size_t binding_index = 0; binding_index < effect.resource_bindings.size();

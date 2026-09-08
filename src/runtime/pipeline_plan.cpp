@@ -69,7 +69,7 @@ PipelinePreparation prepare_pipeline(const profile::Profile& profile,
                                    framegraph::kPluginApiVersion});
             result.effects.push_back(
                 {effect.plugin, effect.plugin, model_path.string(), EffectBackend::neural,
-                 effect.strength});
+                 effect.strength,effect.nr_controls,effect.nr_auto_mask,effect.nr_style,effect.nr_preset,effect.nr_intensity});
             input = output;
             continue;
         }

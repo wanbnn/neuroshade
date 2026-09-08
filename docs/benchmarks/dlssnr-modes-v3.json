@@ -1,0 +1,29 @@
+{
+  "styles_reference_bitwise_equal": true,
+  "distinct_styles": 3,
+  "temporal_frames": 3,
+  "in_place_update_and_restore": true,
+  "presets_resolve_to": 1,
+  "intensity_zero_identity": true,
+  "intensity_levels": [
+    1.0,
+    0.0,
+    0.5,
+    1.38,
+    2.0
+  ],
+  "intensity_fp32_residual_kernel": true,
+  "rtx_equivalence_tested": false,
+  "style_sha256": {
+    "0": "a005cd601d2a75b5a6e15ffe80d357ccf95f1d7384d3ca78b80ba463b13efcb4",
+    "1": "93b997f2f7d8f1cfbd069cc215b294ec4253bd11ca3cd558a69efeca0cc5dd0c",
+    "2": "493e97bffc2d6cb0a93b6d8fb007de42166d9dc491314df0e0496b3b1f242fd5"
+  },
+  "intensity_sha256": {
+    "1.0": "a005cd601d2a75b5a6e15ffe80d357ccf95f1d7384d3ca78b80ba463b13efcb4",
+    "0.0": "7d889fda8b8ee9ddb6844450a6cd482c1e37cee956ed9d05c4669ca4653c378f",
+    "0.5": "276bb79504b4140e7a2ea80b2796196f20f66e1c6cd9a838c4a904476256c242",
+    "1.38": "38c9300d0522822777270d93a8307ee3a11b728f85586e5b00b27140fbbb161f",
+    "2.0": "944d60e6111e59d82d3d5a351985592be227fbfa94c9cab772c1a296864631ef"
+  }
+}

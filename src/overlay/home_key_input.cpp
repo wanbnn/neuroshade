@@ -29,7 +29,7 @@ struct HomeKeyInput::Impl {
     xcb_cursor_t cursor{};
     int origin_x{}, origin_y{};
     std::vector<UiInput> events;
-    const std::uint32_t control_keys[15] = {XK_F1,XK_F2,XK_F3,XK_F4,XK_F5,XK_F6,XK_F7,
+    const std::uint32_t control_keys[16] = {XK_F1,XK_F2,XK_F3,XK_F4,XK_F5,XK_F6,XK_F7,XK_F8,
         XK_Up,XK_Down,XK_Left,XK_Right,XK_Return,XK_space,XK_Page_Up,XK_Page_Down};
 
     // Probe devices may never present. Let only a presenting device acquire

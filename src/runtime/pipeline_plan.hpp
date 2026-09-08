@@ -18,6 +18,10 @@ struct PlannedEffect {
     std::string artifact;
     EffectBackend backend{EffectBackend::shader};
     float strength{1.0F};
+    std::array<float,3> nr_controls{0.f,1.f,1.f};
+    bool nr_auto_mask{true};
+    unsigned nr_style{0},nr_preset{0};
+    float nr_intensity{1.f};
 };
 
 struct PipelinePreparation {

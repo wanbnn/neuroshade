@@ -1,0 +1,12 @@
+[Unit]
+Description=NeuroShade native C++ HIP host for Far Cry 3
+
+[Service]
+Type=exec
+ExecStart=%h/.local/libexec/neuroshade/ns-dlssnr-host --socket %h/.local/state/neuroshade/fc3-native/runtime-cpp.sock --model %h/.local/share/neuroshade/models/dlssnr-1080p.nsmodel
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=10
+UMask=0077
+StandardOutput=journal
+StandardError=journal

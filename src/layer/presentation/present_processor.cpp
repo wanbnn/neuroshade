@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include "layer/presentation/present_processor.hpp"
 #include "logging/log.hpp"
 #include "neural/runtime/host_client.hpp"
@@ -47,6 +48,13 @@ void check(VkResult result, const char* operation) {
 [[nodiscard]] std::uint32_t memory_type(
     const VkPhysicalDeviceMemoryProperties& properties, std::uint32_t allowed,
     VkMemoryPropertyFlags required) {
+    // CPU readback needs cached system memory when the device exposes it.
+    if(required & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+        const auto preferred=required | VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+        for(std::uint32_t index=0;index<properties.memoryTypeCount;++index)
+            if((allowed & (std::uint32_t{1}<<index)) &&
+               (properties.memoryTypes[index].propertyFlags & preferred)==preferred)return index;
+    }
     for (std::uint32_t index = 0; index < properties.memoryTypeCount; ++index) {
         if ((allowed & (std::uint32_t{1} << index)) != 0 &&
             (properties.memoryTypes[index].propertyFlags & required) == required) {
@@ -91,6 +99,7 @@ struct PresentProcessor::Impl {
         VkBuffer handle{VK_NULL_HANDLE};
         VkDeviceMemory memory{VK_NULL_HANDLE};
         void* mapped{};
+        VkDeviceSize allocation_size{};
     };
     struct Stage {
         VkShaderModule module{VK_NULL_HANDLE};
@@ -99,6 +108,7 @@ struct PresentProcessor::Impl {
     };
     struct ImageResources {
         Buffer input;
+        int shared_slot=-1;
         Buffer overlay;
         VkQueryPool queries{};
         bool submitted{};
@@ -130,8 +140,11 @@ struct PresentProcessor::Impl {
     double gpu_ms{};
     bool neural_mode{};
     bool external_mode{};
+    bool shared_mode{};
+    std::uint32_t owner_family{};
     std::unique_ptr<neural::HostClient> host;
     float host_strength{1.f};
+    std::vector<runtime::PlannedEffect> configured_effects;
     bool host_logged{},host_failed{};
     bool temporal_mode{};
 #if defined(NEUROSHADE_LAYER_NEURAL)
@@ -156,6 +169,7 @@ struct PresentProcessor::Impl {
          const std::string& overlay_shader, VkFormat image_format)
         : device(logical_device), dispatch(functions), extent(image_extent), format(image_format),
           byte_count(static_cast<VkDeviceSize>(extent.width) * extent.height * 4) {
+        owner_family=queue_family;
         if (!dispatch.complete()) throw std::runtime_error("incomplete present dispatch");
         if (images.empty() || (pipeline.effects.empty() && overlay_shader.empty())) {
             throw std::runtime_error("present pipeline has no images or effects");
@@ -175,7 +189,12 @@ struct PresentProcessor::Impl {
                std::count_if(pipeline.effects.begin(),pipeline.effects.end(),[](const auto& e){return e.backend==runtime::EffectBackend::neural;})!=1)
                 throw std::runtime_error("host64 requires one neural effect first, followed by shaders");
             host=std::make_unique<neural::HostClient>(pipeline.effects.front().artifact,extent.width,extent.height);
+            configured_effects=pipeline.effects;
+            if(pipeline.effects.front().nr_controls!=std::array<float,3>{0.f,1.f,1.f}||!pipeline.effects.front().nr_auto_mask||pipeline.effects.front().nr_style||pipeline.effects.front().nr_preset||pipeline.effects.front().nr_intensity!=1.f){
+                if(!host->configure_nr(pipeline.effects.front().nr_controls,pipeline.effects.front().nr_auto_mask,pipeline.effects.front().nr_style,pipeline.effects.front().nr_preset,pipeline.effects.front().nr_intensity))throw std::runtime_error(host->error());
+            }
             host_strength=pipeline.effects.front().strength;
+            shared_mode=dispatch.get_memory_fd&&host->supports_shared();
             neural_mode=false;
             nslog::write(nslog::Level::info,"host64_connected="+host->description());
         }
@@ -282,9 +301,12 @@ struct PresentProcessor::Impl {
     }
 
     Buffer create_buffer(const VkPhysicalDeviceMemoryProperties& properties,
-                         bool host_visible) {
+                         bool host_visible,bool exportable=false) {
         Buffer buffer{};
         VkBufferCreateInfo info{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        VkExternalMemoryBufferCreateInfo external{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+        external.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+        if(exportable)info.pNext=&external;
         info.size = byte_count;
         info.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
                      VK_BUFFER_USAGE_TRANSFER_DST_BIT;
@@ -296,6 +318,10 @@ struct PresentProcessor::Impl {
             dispatch.get_buffer_memory_requirements(device, buffer.handle, &requirements);
             VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
             allocation.allocationSize = requirements.size;
+            buffer.allocation_size=requirements.size;
+            VkExportMemoryAllocateInfo exported{VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO};
+            exported.handleTypes=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+            if(exportable)allocation.pNext=&exported;
             const VkMemoryPropertyFlags required = host_visible
                 ? VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
                 : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
@@ -324,7 +350,23 @@ struct PresentProcessor::Impl {
         std::vector<VkDescriptorSetLayout> layouts(stages.size(), descriptor_layout);
         image_resources.resize(images.size());
         for (auto& resources : image_resources) {
-            resources.input = create_buffer(properties, host_visible);
+            if(shared_mode){
+                int fd=-1;
+                try{
+                    resources.input=create_buffer(properties,false,true);
+                    VkMemoryGetFdInfoKHR info{VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR};info.memory=resources.input.memory;info.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                    check(dispatch.get_memory_fd(device,&info,&fd),"vkGetMemoryFdKHR(native)");
+                    resources.shared_slot=host->import_frame(fd,resources.input.allocation_size,byte_count,dispatch.device_pci);
+                    close(fd);fd=-1;
+                    nslog::write(nslog::Level::info,"host64_transport=vulkan_hip_shared slot="+std::to_string(resources.shared_slot));
+                }catch(const std::exception& e){
+                    if(fd>=0)close(fd);
+                    destroy_buffer(resources.input);
+                    nslog::write(nslog::Level::warning,"host64_transport=cpu_fallback reason="+std::string(e.what()));
+                    // Fall back per image; successfully imported images retain their own path.
+                    resources.input=create_buffer(properties,host_visible);
+                }
+            }else resources.input = create_buffer(properties, host_visible);
             if (!neural_mode) resources.overlay = create_buffer(properties, true);
             const std::size_t output_count = neural_mode ? 1 : stages.size();
             resources.outputs.reserve(output_count);
@@ -384,7 +426,7 @@ struct PresentProcessor::Impl {
     }
 
     void record_neural_transfer(VkCommandBuffer command, VkImage image,
-                                VkBuffer buffer, bool download) {
+                                VkBuffer buffer, bool download,bool shared=false) {
         const VkBufferImageCopy copy{{}, 0, 0,
                                      {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                                      {0, 0, 0}, {extent.width, extent.height, 1}};
@@ -401,7 +443,8 @@ struct PresentProcessor::Impl {
             dispatch.cmd_copy_image_to_buffer(command, image,
                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                               buffer, 1, &copy);
-            buffer_barrier(command,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_HOST_READ_BIT,
+            if(shared)external_barrier(command,buffer,true);
+            else buffer_barrier(command,VK_ACCESS_TRANSFER_WRITE_BIT,VK_ACCESS_HOST_READ_BIT,
                            VK_PIPELINE_STAGE_TRANSFER_BIT,VK_PIPELINE_STAGE_HOST_BIT);
             image_barrier(command, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                           VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
@@ -616,6 +659,17 @@ struct PresentProcessor::Impl {
         }
     }
 
+    void external_barrier(VkCommandBuffer command,VkBuffer buffer,bool release){
+        VkBufferMemoryBarrier barrier{VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+        barrier.srcAccessMask=release?VK_ACCESS_TRANSFER_WRITE_BIT:0;
+        barrier.dstAccessMask=release?0:VK_ACCESS_SHADER_READ_BIT|VK_ACCESS_TRANSFER_READ_BIT;
+        barrier.srcQueueFamilyIndex=release?owner_family:VK_QUEUE_FAMILY_EXTERNAL;
+        barrier.dstQueueFamilyIndex=release?VK_QUEUE_FAMILY_EXTERNAL:owner_family;
+        barrier.buffer=buffer;barrier.size=byte_count;
+        dispatch.cmd_pipeline_barrier(command,release?VK_PIPELINE_STAGE_TRANSFER_BIT:VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+            release?VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT:VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,0,0,nullptr,1,&barrier,0,nullptr);
+    }
+
     void buffer_barrier(VkCommandBuffer command, VkAccessFlags source_access,
                         VkAccessFlags destination_access, VkPipelineStageFlags source_stage,
                         VkPipelineStageFlags destination_stage) {
@@ -666,6 +720,8 @@ struct PresentProcessor::Impl {
             dispatch.cmd_copy_image_to_buffer(command, image,
                                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                               resources.input.handle, 1, &copy);
+            } else if(resources.shared_slot>=0){
+                external_barrier(command,resources.input.handle,false);
             } else {
                 buffer_barrier(command,VK_ACCESS_HOST_WRITE_BIT,VK_ACCESS_SHADER_READ_BIT,
                     VK_PIPELINE_STAGE_HOST_BIT,VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
@@ -724,7 +780,7 @@ struct PresentProcessor::Impl {
                            base_stage_count);
             record_command(resources.commands[1], images[image_index], resources,
                            stages.size());
-            if(external_mode) record_neural_transfer(resources.commands[2],images[image_index],resources.input.handle,true);
+            if(external_mode) record_neural_transfer(resources.commands[2],images[image_index],resources.input.handle,true,resources.shared_slot>=0);
         }
     }
 
@@ -737,6 +793,7 @@ struct PresentProcessor::Impl {
 
     void destroy() noexcept {
         if (!device) return;
+        host.reset();
         for (auto& resources : image_resources) {
             if (resources.completion) {
                 dispatch.destroy_semaphore(device, resources.completion, nullptr);
@@ -852,7 +909,9 @@ VkResult PresentProcessor::submit(VkQueue queue, std::uint32_t image_index,
         result=impl_->dispatch.wait_for_fences(impl_->device,1,&resources.download_fence,VK_TRUE,5'000'000'000ULL);
         if(result!=VK_SUCCESS)return result;
         const bool bgra=impl_->format==VK_FORMAT_B8G8R8A8_UNORM || impl_->format==VK_FORMAT_B8G8R8A8_SRGB;
-        bool executed=impl_->host->process({static_cast<std::uint8_t*>(resources.input.mapped),static_cast<std::size_t>(impl_->byte_count)},
+        bool executed=resources.shared_slot>=0
+            ?impl_->host->process_shared(static_cast<unsigned>(resources.shared_slot),impl_->extent.width,impl_->extent.height,bgra,impl_->host_strength)
+            :impl_->host->process({static_cast<std::uint8_t*>(resources.input.mapped),static_cast<std::size_t>(impl_->byte_count)},
             impl_->extent.width,impl_->extent.height,bgra,impl_->host_strength);
         if((executed && !impl_->host_logged) || (!executed && !impl_->host_failed)) {
             nslog::write(executed?nslog::Level::info:nslog::Level::warning,
@@ -860,6 +919,7 @@ VkResult PresentProcessor::submit(VkQueue queue, std::uint32_t image_index,
                          "neural_present=copy-fallback reason="+impl_->host->error());
             impl_->host_logged=true;impl_->host_failed=!executed;
         }
+        if(!executed&&resources.shared_slot>=0)return VK_ERROR_DEVICE_LOST;
     }
     if (overlay_visible && resources.overlay.mapped) {
         if (overlay_pixels && overlay_pixels->size() * sizeof(std::uint32_t) == impl_->byte_count)
@@ -881,6 +941,20 @@ VkResult PresentProcessor::submit(VkQueue queue, std::uint32_t image_index,
     resources.submitted = result == VK_SUCCESS;
     if (result == VK_SUCCESS) completion = resources.completion;
     return result;
+}
+
+bool PresentProcessor::update_nr(const runtime::PipelinePreparation& pipeline,std::string& error){
+    if(!impl_->host||!impl_->host->supports_nr()||pipeline.effects.empty()||pipeline.effects.size()!=impl_->configured_effects.size())return false;
+    for(std::size_t i=0;i<pipeline.effects.size();++i){
+        const auto& a=pipeline.effects[i];const auto& b=impl_->configured_effects[i];
+        if(a.plugin!=b.plugin||a.artifact!=b.artifact||a.backend!=b.backend||a.pass!=b.pass||(i&&a.strength!=b.strength))return false;
+    }
+    const auto& requested=pipeline.effects.front();
+    if((requested.nr_controls!=impl_->configured_effects.front().nr_controls||requested.nr_auto_mask!=impl_->configured_effects.front().nr_auto_mask||requested.nr_style!=impl_->configured_effects.front().nr_style||requested.nr_preset!=impl_->configured_effects.front().nr_preset||requested.nr_intensity!=impl_->configured_effects.front().nr_intensity)&&!impl_->host->configure_nr(requested.nr_controls,requested.nr_auto_mask,requested.nr_style,requested.nr_preset,requested.nr_intensity)){
+        error=impl_->host->error();return true;
+    }
+    impl_->host_strength=requested.strength;impl_->configured_effects=pipeline.effects;
+    nslog::write(nslog::Level::info,"nr_overlay=applied intensity="+std::to_string(requested.strength));return true;
 }
 
 double PresentProcessor::average_ms() const noexcept {

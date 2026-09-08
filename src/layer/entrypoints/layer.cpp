@@ -269,7 +269,29 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
     if (next_create == nullptr || next_gdpa == nullptr) return VK_ERROR_INITIALIZATION_FAILED;
     chain->u.pLayerInfo = chain->u.pLayerInfo->pNext;
 
-    const VkResult result = next_create(physical_device, create_info, allocator, device);
+    VkDeviceCreateInfo modified=*create_info;
+    std::vector<const char*> extensions;
+    bool shared_enabled=false;
+    if(const char* shared=std::getenv("NEUROSHADE_GPU_SHARED");shared&&std::string_view(shared)=="1"){
+        if(const auto instance=find_instance(physical_device)){
+            auto enumerate=load_instance<PFN_vkEnumerateDeviceExtensionProperties>(instance->get_instance_proc_addr,instance->handle,"vkEnumerateDeviceExtensionProperties");
+            std::uint32_t count=0;
+            if(enumerate&&enumerate(physical_device,nullptr,&count,nullptr)==VK_SUCCESS){
+                std::vector<VkExtensionProperties> available(count);
+                if(enumerate(physical_device,nullptr,&count,available.data())==VK_SUCCESS){
+                    const auto supports=[&](const char* name){return std::any_of(available.begin(),available.end(),[&](const auto& e){return std::strcmp(e.extensionName,name)==0;});};
+                    if(supports(VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME)&&supports(VK_EXT_PCI_BUS_INFO_EXTENSION_NAME)){
+                        for(std::uint32_t i=0;i<create_info->enabledExtensionCount;++i)extensions.push_back(create_info->ppEnabledExtensionNames[i]);
+                        for(const char* name:{VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME,VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME}){
+                            if(supports(name)&&std::none_of(extensions.begin(),extensions.end(),[&](const auto* e){return std::strcmp(e,name)==0;}))extensions.push_back(name);
+                        }
+                        modified.enabledExtensionCount=static_cast<std::uint32_t>(extensions.size());modified.ppEnabledExtensionNames=extensions.data();shared_enabled=true;
+                    }
+                }
+            }
+        }
+    }
+    const VkResult result = next_create(physical_device, &modified, allocator, device);
     if (result != VK_SUCCESS) return result;
 
     DeviceDispatch dispatch{};
@@ -298,6 +320,29 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkCreateDevice(
         instance->get_memory_properties(physical_device, &dispatch.memory_properties);
     }
     auto& present = dispatch.present_dispatch;
+    if(shared_enabled){
+        if(const auto instance=find_instance(physical_device)){
+            auto properties2=load_instance<PFN_vkGetPhysicalDeviceProperties2>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceProperties2");
+            if(properties2){
+                VkPhysicalDevicePCIBusInfoPropertiesEXT id{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PCI_BUS_INFO_PROPERTIES_EXT};
+                VkPhysicalDeviceProperties2 properties{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};properties.pNext=&id;
+                properties2(physical_device,&properties);
+                const std::uint32_t pci[4]={id.pciDomain,id.pciBus,id.pciDevice,id.pciFunction};
+                std::memcpy(present.device_pci,pci,sizeof(pci));
+                auto external_properties=load_instance<PFN_vkGetPhysicalDeviceExternalBufferProperties>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceExternalBufferProperties");
+                if(external_properties){
+                    VkPhysicalDeviceExternalBufferInfo query{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_BUFFER_INFO};
+                    query.usage=VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+                    query.handleType=VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+                    VkExternalBufferProperties external{VK_STRUCTURE_TYPE_EXTERNAL_BUFFER_PROPERTIES};external_properties(physical_device,&query,&external);
+                    const auto flags=external.externalMemoryProperties.externalMemoryFeatures;
+                    constexpr auto required=VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT|VK_EXTERNAL_MEMORY_FEATURE_IMPORTABLE_BIT;
+                    if((flags&required)==required&&!(flags&VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT))
+                        present.get_memory_fd=load_device<PFN_vkGetMemoryFdKHR>(next_gdpa,*device,"vkGetMemoryFdKHR");
+                }
+            }
+        }
+    }
     dispatch.queue_wait_idle=load_device<PFN_vkQueueWaitIdle>(next_gdpa,*device,"vkQueueWaitIdle");
     if (const auto instance=find_instance(physical_device)) {
         auto properties=load_instance<PFN_vkGetPhysicalDeviceProperties>(instance->get_instance_proc_addr,instance->handle,"vkGetPhysicalDeviceProperties");
@@ -812,7 +857,7 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
                                         neuroshade::runtime::PipelineMode::shader_only;
                     nslog::write(nslog::Level::info,
                                  "present_processing=active backend=" +
-                                     std::string(neural ? "neural host_staging" : "shader") +
+                                     std::string(neural ? "neural" : "shader") +
                                      " extent=" +
                                      std::to_string(extent.width) + "x" +
                                      std::to_string(extent.height) + " overlay=" +
@@ -843,6 +888,16 @@ NS_LAYER_EXPORT VKAPI_ATTR VkResult VKAPI_CALL vkQueuePresentKHR(
                         error="modelos temporais requerem recursos adicionais";
                     else if(!dispatch->queue_wait_idle || dispatch->queue_wait_idle(queue)!=VK_SUCCESS)
                         error="falha ao sincronizar GPU";
+                    else if(processor->update_nr(candidate,error)){
+                        if(error.empty()){
+                            std::scoped_lock lock(state_mutex);
+                            if(auto found=device_dispatches.find(dispatch_key(queue));found!=device_dispatches.end())
+                                found->second.pipeline=std::make_shared<const neuroshade::runtime::PipelinePreparation>(candidate);
+                            auto snapshot=dispatch->overlay->snapshot();snapshot.passes.clear();
+                            for(const auto& e:ui.draft.pipeline)snapshot.passes.push_back({e.plugin,e.enabled,0,e.strength,e.model});
+                            dispatch->overlay->update(std::move(snapshot));
+                        }
+                    }
                     else {
                         auto created=neuroshade::layer::PresentProcessor::create(logical_device,
                             dispatch->memory_properties,queue_family,extent,format,images,candidate,

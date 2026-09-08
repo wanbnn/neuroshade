@@ -1,0 +1,19 @@
+{
+  "capture_reference_bitwise_equal": true,
+  "temporal_frames": 3,
+  "mask_changes_pixels": true,
+  "negative_skin_inherits_structure": true,
+  "invalid_controls_preserve_configuration": true,
+  "output_sha256": {
+    "0": [
+      "d5e23b4926b9a2ec1e5124ca528d11db9220b79931df9614656f7ed03ff8d141",
+      "d5e23b4926b9a2ec1e5124ca528d11db9220b79931df9614656f7ed03ff8d141",
+      "d5e23b4926b9a2ec1e5124ca528d11db9220b79931df9614656f7ed03ff8d141"
+    ],
+    "1": [
+      "e6a1f169eac8dba734d51884e979138199f8f7f18e985acc042e8c64d63f8b04",
+      "e6a1f169eac8dba734d51884e979138199f8f7f18e985acc042e8c64d63f8b04",
+      "e6a1f169eac8dba734d51884e979138199f8f7f18e985acc042e8c64d63f8b04"
+    ]
+  }
+}

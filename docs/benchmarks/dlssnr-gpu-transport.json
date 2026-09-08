@@ -1,0 +1,75 @@
+{
+  "gpu": "gfx1200",
+  "extent": [
+    1920,
+    1080
+  ],
+  "host": "C++64",
+  "transport": "Vulkan opaque FD / HIP external memory",
+  "synchronization": "Vulkan fences, HIP stream completion, external queue ownership barriers",
+  "dx11_present_after_warmup": [
+    {
+      "frame": 2,
+      "ms": 48
+    },
+    {
+      "frame": 3,
+      "ms": 47
+    },
+    {
+      "frame": 4,
+      "ms": 47
+    },
+    {
+      "frame": 5,
+      "ms": 47
+    },
+    {
+      "frame": 6,
+      "ms": 49
+    },
+    {
+      "frame": 7,
+      "ms": 48
+    },
+    {
+      "frame": 8,
+      "ms": 49
+    },
+    {
+      "frame": 9,
+      "ms": 48
+    },
+    {
+      "frame": 10,
+      "ms": 48
+    },
+    {
+      "frame": 11,
+      "ms": 60
+    }
+  ],
+  "qualification": {
+    "dx9_x64": "pass",
+    "dx11_x64": "pass",
+    "dx12_x64": "pass",
+    "dx9_x86_shared": "pass; 12 frames and 1 reset; message pump excluded after Wine hang reproduced without layer",
+    "dx9_x86_cpu_fallback": "pass",
+    "installed_x86_profile": "pass; model 0.1.2 + existing two shader effects + overlay",
+    "gpu_io_output_equality": "6 cases, bitwise equal to previous runtime",
+    "shared_output_equality": "6 cases RGBA/BGRA x strength 0/128/255, bitwise equal",
+    "cpu_tests": "9 passed including SCM_RIGHTS and composition"
+  },
+  "limitations": [
+    "Not a Far Cry 3 FPS benchmark",
+    "Graph itself remains about 47ms; 30 FPS not achieved",
+    "No external HIP/Vulkan semaphores yet",
+    "No new depth/motion inputs or Swin weight/kernel modifications"
+  ],
+  "installed_sha256": {
+    "/home/wanbnn/.local/libexec/neuroshade/ns-dlssnr-host": "83689ac6227817fcf53861320eca922372ffcf5ede2ad5701faf92e1e46aa36c",
+    "/home/wanbnn/.local/share/neuroshade/runtime/lib/libneuroshade_dlssnr.so": "da8510540085fa607e819bb0f2a83131479762e16dbdd2b2c7b43924e30b1c07",
+    "/home/wanbnn/.local/lib/neuroshade/fc3-x86/libVkLayer_neuroshade.so": "e2e7917c977685cdaf7986315f6a2de5db5770cd897f3d2c5ef8633601f88a16",
+    "/home/wanbnn/.local/lib/neuroshade/libVkLayer_neuroshade.so": "591289080c50d8b73816819b315acbb45190e33fe57627925e9a4fb74dff89ce"
+  }
+}

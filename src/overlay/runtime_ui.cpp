@@ -45,7 +45,7 @@ RuntimeUi::RuntimeUi(profile::Profile profile,std::filesystem::path path,std::fi
     scan();
 }
 void RuntimeUi::scan() {
-    presets_.clear(); models_.clear();
+    presets_.clear(); models_.clear();native_models_.clear();
     std::error_code ec;
     for (const auto& dir : {path_.parent_path(),presets_dir_})
         for (const auto& entry : std::filesystem::directory_iterator(dir,ec))
@@ -58,6 +58,19 @@ void RuntimeUi::scan() {
         if (entry.path().extension()==".nsmodel") models_.push_back(entry.path());
     std::sort(presets_.begin(),presets_.end()); std::sort(models_.begin(),models_.end());
     selection_=0;
+}
+int RuntimeUi::native_effect() {
+    for(std::size_t i=0;i<draft.pipeline.size();++i){
+        const auto& effect=draft.pipeline[i];if(effect.model.empty())continue;
+        const auto path=root_/"share/neuroshade"/effect.model;
+        const auto key=path.string();auto found=native_models_.find(key);
+        if(found==native_models_.end()){
+            const auto loaded=neural::load_model_package(path);
+            found=native_models_.emplace(key,loaded.valid()&&loaded.package.manifest.runtime=="dlssnr_hip").first;
+        }
+        if(found->second)return static_cast<int>(i);
+    }
+    return -1;
 }
 void RuntimeUi::tick() {
     auto now=Clock::now();
@@ -107,7 +120,7 @@ void RuntimeUi::applied(bool ok,const std::string& error) {
     else note("Nao aplicado: "+error);
 }
 void RuntimeUi::action(int id) {
-    if (id>=100 && id<107) {tab_=id-100;focus_=0;page_=0;return;}
+    if (id>=100 && id<108) {tab_=id-100;focus_=0;page_=0;return;}
     if (id==1) {apply_requested=true;return;}
     if (id==2 || id==3) {
         std::string error;
@@ -164,6 +177,24 @@ void RuntimeUi::action(int id) {
     if (id==10) {page_=std::max(0,page_-1);return;}
     if (id==11) {++page_;return;}
     if (id>=1000 && id<2000) {selection_=id-1000;return;}
+    if(id>=30000&&id<30100){
+        const int index=native_effect();if(index<0)return;
+        auto& effect=draft.pipeline[static_cast<std::size_t>(index)];
+        if(id==30000)effect.enabled=!effect.enabled;
+        if(id==30001)effect.strength=std::max(0.f,effect.strength-.05f);
+        if(id==30002)effect.strength=std::min(1.f,effect.strength+.05f);
+        if(id==30003){effect.strength=1.f;effect.nr_controls={0.f,1.f,1.f};effect.nr_auto_mask=true;effect.nr_style=effect.nr_preset=0;effect.nr_intensity=1.f;}
+        if(id==30005)effect.nr_intensity=std::max(0.f,effect.nr_intensity-.05f);
+        if(id==30006)effect.nr_intensity=std::min(2.f,effect.nr_intensity+.05f);
+        if(id==30007)effect.nr_style=(effect.nr_style+1)%3;
+        if(id==30008)effect.nr_preset=(effect.nr_preset+1)%4;
+        if(id==30004)effect.nr_auto_mask=!effect.nr_auto_mask;
+        if(id>=30010&&id<30016){
+            auto& value=effect.nr_controls[static_cast<std::size_t>((id-30010)/2)];
+            value=std::clamp(value+((id-30010)%2?.05f:-.05f),id>=30014?-1.f:0.f,2.f);
+        }
+        dirty_=true;return;
+    }
     if (id>=2000) {
         const auto index=static_cast<std::size_t>((id-2000)/10); int op=(id-2000)%10;
         if (index>=draft.pipeline.size()) return;
@@ -209,7 +240,7 @@ void RuntimeUi::draw(unsigned width,unsigned height,const Snapshot& snapshot,
                 action(b.action);changed=true;break;
             }
         }
-        if(event.key>=0xffbe && event.key<=0xffc4) {action(100+event.key-0xffbe);changed=true;}
+        if(event.key>=0xffbe && event.key<=0xffc5) {action(100+event.key-0xffbe);changed=true;}
         if(event.key==0xff52 || event.key==0xff51) {focus_=std::max(0,focus_-1);changed=true;}
         if(event.key==0xff54 || event.key==0xff53) {focus_=std::min(static_cast<int>(buttons_.size())-1,focus_+1);changed=true;}
         if((event.key==0xff0d || event.key==0x20) && focus_>=0 && focus_<static_cast<int>(buttons_.size())) {action(buttons_[focus_].action);changed=true;}
@@ -224,11 +255,11 @@ void RuntimeUi::draw(unsigned width,unsigned height,const Snapshot& snapshot,
     const int pw=std::min(870,static_cast<int>(width)-32);
     const int ph=std::min(590,static_cast<int>(height)-270);
     panel(16,16,pw,ph,"NEUROSHADE  /  "+snapshot.game);
-    text(32,51,"Home: fechar  |  F1-F7: paginas  |  Setas + Enter: controles",0xff9aabc1);
+    text(32,51,"Home: fechar  |  F1-F8: paginas  |  Setas + Enter: controles",0xff9aabc1);
     text(32,74,mouse?"Mouse capturado pelo painel":"Use o teclado: mouse indisponivel nesta janela",0xff9aabc1);
-    const char* tabs[]={"Efeitos","Presets","Modelos","GPUs","Ajustes","Recursos","Logs"};
-    for(int i=0;i<7;++i) button(32+i*116,105,110,std::string("F")+std::to_string(i+1)+" "+tabs[i],100+i);
-    rect(32+tab_*116,135,110,3,0xffe1ae54);
+    const char* tabs[]={"Efeitos","Presets","Modelos","GPUs","Ajustes","Recursos","Logs","DLSSNR"};
+    for(int i=0;i<8;++i) button(32+i*103,105,99,std::string(tabs[i]),100+i);
+    rect(32+tab_*103,135,99,3,0xffe1ae54);
     int x=32,y=152;
     int available=std::max(1,(ph-270)/42);
     if(tab_==0) {
@@ -253,7 +284,7 @@ void RuntimeUi::draw(unsigned width,unsigned height,const Snapshot& snapshot,
         button(x+232,ph-102,190,"Salvar novo preset",3);button(x+434,ph-102,140,"Atualizar",5);
     } else if(tab_==2) {
         text(x,y,"MODELOS INSTALADOS",0xffe1ae54);y+=29;
-        text(x,y,"Motores: PyTorch / ROCm (GPU) + ONNX Runtime (CPU).");y+=24;
+        text(x,y,"Motores: HIP nativo / PyTorch / ONNX Runtime.");y+=24;
         text(x,y,"Selecione um modelo -> Usar modelo -> Aplicar.",0xff9aabc1);y+=33;
         if(models_.empty()) text(x,y,"Nenhum pacote .nsmodel instalado.");
         page_=std::min(page_,std::max(0,(static_cast<int>(models_.size())-1)/available));
@@ -287,6 +318,33 @@ void RuntimeUi::draw(unsigned width,unsigned height,const Snapshot& snapshot,
             text(x,y,resource.semantic+"  "+std::to_string(resource.width)+"x"+std::to_string(resource.height)+"  confianca "+number(resource.confidence*100,0)+"%");y+=30;
         }
         if(snapshot.resources.empty()) text(x,y,"Aguardando recursos do jogo.");
+    } else if(tab_==7){
+        text(x,y,"DLSSNR  /  "+std::string(dirty_?"* alteracoes pendentes":"aplicado"),0xffe1ae54);y+=32;
+        const int index=native_effect();
+        if(index<0){
+            text(x,y,"Nenhum modelo DLSSNR no perfil.");y+=30;
+            text(x,y,"Selecione o pacote na pagina Modelos (F3).",0xff9aabc1);
+        }else{
+            auto& e=draft.pipeline[static_cast<std::size_t>(index)];
+            button(x,y,160,e.enabled?"NR: Ligado":"NR: Desligado",30000);y+=36;
+            text(x,y,"NR Preset");button(x+225,y-4,160,e.nr_preset?"Preset #"+std::to_string(e.nr_preset):"Default",30008);
+            text(x+405,y,e.nr_preset>1?"Efetivo: #1 (fallback)":"Efetivo: #1",0xff9aabc1);y+=30;
+            const char* styles[]={"Default","Natural","Cinematic"};
+            text(x,y,"NR Style");button(x+225,y-4,160,styles[std::min(e.nr_style,2u)],30007);y+=30;
+            text(x,y+4,"NR Intensity");button(x+225,y,34,"-",30005);
+            text(x+278,y+4,number(e.nr_intensity,2));button(x+352,y,34,"+",30006);
+            text(x+430,y+4,"Mistura");button(x+530,y,34,"-",30001);
+            text(x+580,y+4,number(e.strength*100,0)+"%");button(x+665,y,34,"+",30002);y+=36;
+            text(x,y,"Automatic Mask");button(x+225,y-4,160,e.nr_auto_mask?"Ligado":"Desligado",30004);y+=30;
+            const char* labels[]={"Local Tone","Local Structure","Skin Structure"};
+            for(int control=0;control<3;++control){
+                text(x,y+4,labels[control]);button(x+225,y,34,"-",30010+control*2);
+                text(x+278,y+4,control==2&&e.nr_controls[control]<0?"Herdar":number(e.nr_controls[control],2));button(x+352,y,34,"+",30011+control*2);y+=32;
+            }
+            text(x,y+8,"Intensity: 0=original, 1=normal, 2=ampliado. Pele negativa: herdar.",0xff9aabc1);
+            button(x,ph-102,110,"Aplicar",1);button(x+122,ph-102,110,"Salvar",2);
+            button(x+244,ph-102,160,"Restaurar NR",30003);
+        }
     } else {
         text(x,y,"EVENTOS DA INTERFACE",0xffe1ae54);y+=32;
         int first=std::max(0,static_cast<int>(messages_.size())-available);
