@@ -10,6 +10,18 @@ NeuroShade adds configurable GPU post-processing and neural rendering to compati
 
 **Linux + AMD.** DirectX 9/11 games use DXVK; DirectX 12 games use VKD3D-Proton. Native Vulkan games use the layer directly. Native Windows installation is not available yet.
 
+---
+
+### 💸 Send help, I burned all my GPT money
+
+For the love of God, toss a coin to your boy.  
+I spent my entire budget feeding the GPT goblin. 🤖💀
+
+[☕ Fund my questionable AI decisions](https://buymeacoffee.com/wanbnn)
+
+---
+
+
 ## Before / after
 
 Captures supplied from Far Cry 3, shown as a visual example. NeuroShade is not tied to this game. These are different frames, not a controlled image-quality benchmark.
