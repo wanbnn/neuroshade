@@ -7,6 +7,7 @@ payload="$script_dir/payload"
 
 while [ "$#" -gt 0 ]; do
     case "$1" in
+        --help|-h) echo "usage: install.sh [--prefix PATH] [--payload PATH]"; exit 0;;
         --prefix) [ "$#" -ge 2 ] || { echo "install.sh: --prefix needs a path" >&2; exit 64; }; prefix=$2; shift 2;;
         --payload) [ "$#" -ge 2 ] || { echo "install.sh: --payload needs a path" >&2; exit 64; }; payload=$2; shift 2;;
         *) echo "usage: install.sh [--prefix PATH] [--payload PATH]" >&2; exit 64;;
@@ -34,7 +35,21 @@ mkdir -p "$manifest_dir"
 manifest="$manifest_dir/install-manifest.txt"
 temporary="$manifest.tmp.$$"
 (cd "$payload" && find . -type f -print | LC_ALL=C sort | sed 's#^./##') > "$temporary"
-cp -a "$payload/." "$prefix/"
+# Install regular files by rename so upgrades do not truncate mapped libraries.
+while IFS= read -r relative; do
+    destination="$prefix/$relative"
+    mkdir -p "$(dirname -- "$destination")"
+    staged=$(mktemp "$(dirname -- "$destination")/.neuroshade-install.XXXXXX")
+    cp -p "$payload/$relative" "$staged"
+    mv -f "$staged" "$destination"
+done < "$temporary"
+# Preserve the portable payload's library symlinks as well.
+(cd "$payload" && find . -type l -print) | while IFS= read -r relative; do
+    destination="$prefix/$relative"
+    mkdir -p "$(dirname -- "$destination")"
+    ln -sfn "$(readlink "$payload/$relative")" "$destination"
+    printf '%s\n' "${relative#./}" >> "$temporary"
+done
 mv "$temporary" "$manifest"
 if [ ! -e "$config_dir/config.json" ]; then
     config_temporary="$config_dir/.config.json.tmp.$$"
@@ -43,4 +58,9 @@ if [ ! -e "$config_dir/config.json" ]; then
 fi
 
 printf 'NeuroShade installed without root in %s\n' "$prefix"
-printf 'Run: %s/bin/neuroshade doctor\n' "$prefix"
+if [ -x "$prefix/bin/neuroshade-setup" ]; then
+    NEUROSHADE_ROOT="$prefix" "$prefix/bin/neuroshade-setup"
+fi
+printf 'Steam launch option: "%s/bin/neuroshade-run" --nr %%command%%\n' "$prefix"
+printf 'For a 32-bit game behind a launcher, add --32 before %%command%%.\n'
+printf 'Diagnostics: "%s/bin/neuroshade" doctor\n' "$prefix"

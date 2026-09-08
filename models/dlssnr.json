@@ -1,0 +1,19 @@
+{
+  "id": "org.neuroshade.dlssnr.spatial.1920x1080",
+  "version": "0.1.2",
+  "runtime": "dlssnr_hip",
+  "gpu": "gfx1200",
+  "extent": [
+    1920,
+    1080
+  ],
+  "bundle_url": "https://github.com/wanbnn/neuroshade/releases/download/dlssnr-v0.1.2/NeuroShade-dlssnr-0.1.2-gfx1200-linux-x86_64.tar.gz",
+  "sha256": "b34cfff6c97f693c1315b1cf497edad667ce12a8c0e0126529e487b7d3e250d7",
+  "includes": [
+    "weights",
+    "graph",
+    "HIP kernels",
+    "native C++ host",
+    "Vulkan x86 and x64 layers"
+  ]
+}

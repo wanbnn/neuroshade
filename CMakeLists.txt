@@ -87,6 +87,8 @@ file(MAKE_DIRECTORY "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
 configure_file(tools/neuroshade-cli/neuroshade.in
     "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/neuroshade" @ONLY
     FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE WORLD_READ WORLD_EXECUTE)
+configure_file(tools/neuroshade-run/neuroshade-setup
+    "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/neuroshade-setup" COPYONLY)
 find_package(PkgConfig QUIET)
 if(PkgConfig_FOUND)
     pkg_check_modules(GTK4 QUIET IMPORTED_TARGET gtk4)
@@ -865,6 +867,10 @@ if(NOT GTK4_FOUND)
 endif()
 install(FILES "${CMAKE_BINARY_DIR}/org.neuroshade.NeuroShade.desktop"
     DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+install(PROGRAMS tools/neuroshade-run/neuroshade-setup
+    DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY images/ DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/neuroshade/images)
+install(DIRECTORY docs/ DESTINATION ${CMAKE_INSTALL_DATADIR}/doc/neuroshade/docs)
 install(PROGRAMS packaging/linux/install.sh packaging/linux/uninstall.sh
     DESTINATION ${CMAKE_INSTALL_DATADIR}/neuroshade/packaging)
 install(PROGRAMS tests/proton/qualify-proton.sh

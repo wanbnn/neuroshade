@@ -1,5 +1,23 @@
 #!/bin/sh
-set -u
+set -eu
+
+nr=no
+bits=auto
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --nr) nr=yes; shift;;
+        --32) bits=32; shift;;
+        --64) bits=64; shift;;
+        --) shift; break;;
+        --help|-h)
+            printf '%s\n' 'usage: neuroshade-run [--nr] [--32|--64] [--] <command> [arguments...]' \
+                'Steam: ~/.local/bin/neuroshade-run --nr %command%' \
+                '--nr selects the installed DLSSNR profile and starts its native host.' \
+                'Use --32 for 32-bit games launched through Steam/Proton wrappers.'
+            exit 0;;
+        *) break;;
+    esac
+done
 
 if [ "$#" -eq 0 ]; then
     printf '%s\n' "usage: neuroshade-run <command> [arguments...]" >&2
@@ -56,8 +74,70 @@ if [ -z "${NEUROSHADE_PROFILE:-}" ] && command -v sha256sum >/dev/null 2>&1; the
     fi
 fi
 
+# Direct executable launches can select their layer automatically. Wrappers need --32.
+if [ "$bits" = auto ] && command -v file >/dev/null 2>&1; then
+    for argument in "$@"; do
+        [ -f "$argument" ] || continue
+        case "$(file -b -- "$argument")" in
+            *PE32+*|*ELF*64-bit*) bits=64; break;;
+            *PE32*|*ELF*32-bit*) bits=32; break;;
+        esac
+    done
+fi
+if [ "$bits" = 32 ] && [ -z "${NEUROSHADE_LAYER_PATH:-}" ]; then
+    layer_path="$prefix/share/neuroshade/layers/x86"
+    [ -r "$layer_path/VkLayer_neuroshade.json" ] || {
+        echo 'neuroshade-run: install the bundle with the x86 layer for this 32-bit game.' >&2
+        exit 66
+    }
+fi
+if [ "$nr" = yes ]; then
+    export NEUROSHADE_PROFILE=${NEUROSHADE_PROFILE:-"$config_home/profiles/dlssnr.json"}
+fi
+if [ -z "${NEUROSHADE_PROFILE:-}" ]; then
+    export NEUROSHADE_PROFILE="$config_home/profiles/default.json"
+fi
+if [ ! -r "$NEUROSHADE_PROFILE" ]; then
+    "$script_dir/neuroshade-setup"
+fi
+[ -r "$NEUROSHADE_PROFILE" ] || { echo "neuroshade-run: missing profile: $NEUROSHADE_PROFILE" >&2; exit 66; }
+# Start the native host only for the managed native profile. Explicit custom
+# profiles/sockets retain their own lifecycle and model selection.
+if [ "$NEUROSHADE_PROFILE" = "$config_home/profiles/dlssnr.json" ]; then
+    model="$prefix/share/neuroshade/models/dlssnr-1080p.nsmodel"
+    host="$prefix/libexec/neuroshade/ns-dlssnr-host"
+    [ -x "$host" ] && [ -r "$model/weights.bin" ] || {
+        echo 'neuroshade-run: DLSSNR is missing. Install the DLSSNR bundle first.' >&2; exit 66;
+    }
+    export NEUROSHADE_RUNTIME_GPU_SHARED=${NEUROSHADE_RUNTIME_GPU_SHARED:-1}
+    # An explicitly supplied socket belongs to the caller.
+    if [ -z "${NEUROSHADE_RUNTIME_SOCKET:-}" ]; then
+        native_state="${XDG_RUNTIME_DIR:-$state_home}/neuroshade-native"
+        mkdir -p "$native_state"
+        chmod 700 "$native_state"
+        export NEUROSHADE_RUNTIME_SOCKET="$native_state/runtime.sock"
+        command -v flock >/dev/null 2>&1 || { echo 'neuroshade-run: flock is required (util-linux).' >&2; exit 69; }
+        # Serialize startup without touching an existing host or opening a model client.
+        (
+            flock -x 9
+            if flock -n "$NEUROSHADE_RUNTIME_SOCKET.lock" true; then
+                : > "$native_state/host.log"
+                nohup "$host" --socket "$NEUROSHADE_RUNTIME_SOCKET" --model "$model" \
+                    > "$native_state/host.log" 2>&1 < /dev/null 9>&- &
+                host_pid=$!
+                attempt=0
+                while ! grep -q 'runtime=ready' "$native_state/host.log"; do
+                    kill -0 "$host_pid" 2>/dev/null || { cat "$native_state/host.log" >&2; exit 70; }
+                    attempt=$((attempt + 1))
+                    [ "$attempt" -lt 100 ] || { echo 'neuroshade-run: native host startup timed out.' >&2; exit 70; }
+                    sleep 0.1
+                done
+            fi
+        ) 9> "$native_state/start.lock"
+    fi
+fi
 mkdir -p "$state_home"
-session_log="$state_home/session-$(date -u +%Y%m%dT%H%M%SZ)-$$.log"
+session_log="${NEUROSHADE_LOG:-$state_home/session-$(date -u +%Y%m%dT%H%M%SZ)-$$.log}"
 export NEUROSHADE_LOG=$session_log
 {
     printf 'schema_version=1\n'
@@ -66,16 +146,16 @@ export NEUROSHADE_LOG=$session_log
     printf 'profile=%s\n' "${NEUROSHADE_PROFILE:-none}"
     printf 'layer_path=%s\n' "$layer_path"
     printf 'activation=explicit_per_game\n'
-    if command -v rocminfo >/dev/null 2>&1; then
+    if [ "${NEUROSHADE_DIAGNOSTICS:-0}" = 1 ] && command -v rocminfo >/dev/null 2>&1; then
         system_info=$(rocminfo 2>/dev/null || true)
         gpu_record=$(printf '%s\n' "$system_info" | rocm_gpu_record)
         printf 'gpu=%s\n' "$(printf '%s\n' "$gpu_record" | cut -f2-)"
         printf 'gfx=%s\n' "$(printf '%s\n' "$gpu_record" | cut -f1)"
     fi
-    if command -v hipconfig >/dev/null 2>&1; then
+    if [ "${NEUROSHADE_DIAGNOSTICS:-0}" = 1 ] && command -v hipconfig >/dev/null 2>&1; then
         printf 'rocm_version=%s\n' "$(hipconfig --version 2>/dev/null | head -n 1 || true)"
     fi
-    if command -v vulkaninfo >/dev/null 2>&1; then
+    if [ "${NEUROSHADE_DIAGNOSTICS:-0}" = 1 ] && command -v vulkaninfo >/dev/null 2>&1; then
         vulkan_summary=$(vulkaninfo --summary 2>/dev/null || true)
         printf 'vulkan_version=%s\n' "$(printf '%s\n' "$vulkan_summary" | sed -n 's/.*Vulkan Instance Version:[[:space:]]*//p' | head -n 1)"
         printf 'vulkan_driver=%s\n' "$(printf '%s\n' "$vulkan_summary" | sed -n 's/.*driverName[[:space:]]*=[[:space:]]*//p' | head -n 1)"
@@ -99,7 +179,10 @@ export NEUROSHADE_LOG=$session_log
 # Activate the explicit layer only after host diagnostics have completed, so
 # helper processes such as vulkaninfo are never mistaken for the target game.
 export VK_LAYER_PATH="$layer_path${VK_LAYER_PATH:+:$VK_LAYER_PATH}"
-export VK_INSTANCE_LAYERS="VK_LAYER_NEUROSHADE${VK_INSTANCE_LAYERS:+:$VK_INSTANCE_LAYERS}"
+case ":${VK_INSTANCE_LAYERS:-}:" in
+    *:VK_LAYER_NEUROSHADE:*) ;;
+    *) export VK_INSTANCE_LAYERS="VK_LAYER_NEUROSHADE${VK_INSTANCE_LAYERS:+:$VK_INSTANCE_LAYERS}";;
+esac
 export NEUROSHADE_ENABLED=${NEUROSHADE_ENABLED:-1}
 export NEUROSHADE_GAME_EXECUTABLE=$1
 export NEUROSHADE_ROOT=$prefix

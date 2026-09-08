@@ -356,6 +356,7 @@ NeuroShade $version
 usage: neuroshade <command>
 
   doctor [--json|--deep]          inspect or exercise runtime compatibility
+  setup                          Create missing default profiles
   launch <command...>             run through the explicit Vulkan layer
   game add <executable> [profile] register a game
   game list                       list registered games
@@ -375,6 +376,7 @@ command=${1:-help}
 [ "$#" -eq 0 ] || shift
 case "$command" in
     doctor) doctor "${1:-}";;
+    setup) exec "$script_dir/neuroshade-setup" "$@";;
     launch) [ "$#" -gt 0 ] || die "usage: neuroshade launch <command...>"; exec "$script_dir/neuroshade-run" "$@";;
     game)
         action=${1:-}; [ "$#" -eq 0 ] || shift

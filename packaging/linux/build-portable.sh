@@ -17,6 +17,7 @@ cmake --install "$build_dir" --prefix "$package/payload"
 cp "$source_dir/packaging/linux/install.sh" "$package/install.sh"
 cp "$source_dir/packaging/linux/uninstall.sh" "$package/uninstall.sh"
 cp "$source_dir/README.md" "$source_dir/COMPATIBILITY.md" "$source_dir/LICENSE" "$package/"
+cp -a "$source_dir/images" "$source_dir/docs" "$package/"
 chmod 755 "$package/install.sh" "$package/uninstall.sh"
 (cd "$package/payload" && find . -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$package/SHA256SUMS"
 epoch=${SOURCE_DATE_EPOCH:-0}

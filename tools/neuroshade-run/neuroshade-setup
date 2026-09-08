@@ -1,0 +1,33 @@
+#!/bin/sh
+# Idempotent first-run configuration; never replace a user's saved profile.
+set -eu
+case "${1:-}" in --help|-h) echo 'usage: neuroshade-setup'; exit 0;; '') ;; *) exit 64;; esac
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+prefix=${NEUROSHADE_ROOT:-$(dirname -- "$script_dir")}
+config="${XDG_CONFIG_HOME:-$HOME/.config}/neuroshade/profiles"
+mkdir -p "$config"
+umask 077
+# Model paths are emitted as JSON strings, including prefixes with spaces.
+escaped=$(printf '%s' "$prefix" | sed 's/\\/\\\\/g; s/"/\\"/g')
+case "$prefix" in *'
+'*) echo 'neuroshade-setup: newline in prefix is unsupported' >&2; exit 64;; esac
+write_profile() {
+    target=$1
+    tmp=$(mktemp "$config/.profile.XXXXXX")
+    cat > "$tmp"
+    # Hard-link creation is atomic and does not overwrite existing profiles.
+    ln "$tmp" "$target" 2>/dev/null || [ -f "$target" ]
+    rm -f "$tmp"
+}
+write_profile "$config/default.json" <<'JSON'
+{"schema_version":2,"game":{"executable":"game"},"pipeline":[{"plugin":"org.neuroshade.sharpen","enabled":true,"strength":0.25},{"plugin":"org.neuroshade.color_adjust","enabled":true,"strength":1}]}
+JSON
+if [ -r "$prefix/share/neuroshade/models/dlssnr-1080p.nsmodel/manifest.json" ]; then
+    write_profile "$config/dlssnr.json" <<JSON
+{"schema_version":2,"game":{"executable":"game"},"output_extent":{"width":1920,"height":1080},"pipeline":[{"plugin":"org.neuroshade.reconstruction","enabled":true,"strength":1,"model":"$escaped/share/neuroshade/models/dlssnr-1080p.nsmodel","nr_style":0,"nr_preset":0,"nr_intensity":1,"nr_auto_mask":true,"nr_local_tone":0,"nr_local_structure":1,"nr_skin_structure":-1}]}
+JSON
+    printf '%s\n' 'DLSSNR profile ready: use neuroshade-run --nr <command>.'
+else
+    printf '%s\n' 'Post-processing ready. DLSSNR weights are not installed.'
+fi
+printf '%s\n' 'Existing profiles preserved. Open the overlay with Home.'

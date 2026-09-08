@@ -1,187 +1,91 @@
 # NeuroShade
 
-NeuroShade is an AMD-only Vulkan post-processing and neural-rendering runtime for Linux and Proton. The implementation follows [SPEC.md](SPEC.md); milestones M0 through M9 are complete.
+[![CI](https://github.com/wanbnn/neuroshade/actions/workflows/ci.yml/badge.svg)](https://github.com/wanbnn/neuroshade/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/Code-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%2F%20Proton-informational)](COMPATIBILITY.md)
+[![Vulkan](https://img.shields.io/badge/Vulkan-DX9%20%7C%20DX11%20%7C%20DX12-red)](COMPATIBILITY.md)
+[![Downloads](https://img.shields.io/badge/Download-DLSSNR%20bundle-green)](https://github.com/wanbnn/neuroshade/releases)
 
-## Requirements
+NeuroShade adds configurable GPU post-processing and neural rendering to compatible games through a Vulkan layer. Use the same launcher across games, with controls in the in-game overlay and profiles that survive updates.
 
-- Linux x86_64
-- CMake 3.25+ and Make (Ninja may also be used with a manual configure)
-- a C++20 compiler
-- GTK4 development files for the native desktop frontend (Zenity is used as a fallback)
-- Vulkan loader, headers, and a Vulkan 1.2-capable driver
-- `glslc` (Shaderc) to compile bundled SPIR-V shaders; on Ubuntu install `glslc`
-- ROCm/HIP 7.x and its Clang compiler are required when `NS_BUILD_HIP_INTEROP=ON`
-- MIGraphX is optional at configure time and required for the M5 runtime target; use `NS_MIGRAPHX_ROOT` for a non-system installation
-- `.pth` import additionally requires a separate Python environment containing PyTorch, ONNX, NumPy, and ONNX Runtime; set `NEUROSHADE_PYTHON=/path/to/python` when it is not the default `python3`
+**Linux + AMD.** DirectX 9/11 games use DXVK; DirectX 12 games use VKD3D-Proton. Native Vulkan games use the layer directly. Native Windows installation is not available yet.
 
-## Build and test
+## Before / after
 
-```bash
-cmake --preset debug
-cmake --build --preset debug -j
-ctest --preset debug
+Captures supplied from Far Cry 3, shown as a visual example. NeuroShade is not tied to this game. These are different frames, not a controlled image-quality benchmark.
+
+| Before | After |
+| --- | --- |
+| [![Before](images/antes.png)](images/antes.png) | [![After](images/depois.png)](images/depois.png) |
+
+<details>
+<summary>Character detail</summary>
+
+![Character detail](images/face.png)
+
+</details>
+
+## Install
+
+Download and run the installer; it verifies the pinned bundle SHA-256 before installing into `~/.local`, without root:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/wanbnn/neuroshade/main/install.sh -o /tmp/neuroshade-install.sh
+sh /tmp/neuroshade-install.sh
 ```
 
-For an optimized build:
+The DLSSNR bundle includes the weights, native C++ host, shaders, and Vulkan layers for 32-bit and 64-bit games. No Python or manual DLL extraction is needed for inference. Existing profiles are preserved. You can also download the archive from [Releases](https://github.com/wanbnn/neuroshade/releases), extract it and run its `install.sh`.
 
-```bash
-cmake --preset release
-cmake --build --preset release -j
-ctest --preset release
+**Current DLSSNR requirements:** AMD `gfx1200` (qualified on RX 9060 XT), ROCm/HIP 7, Linux x86-64 and a **1920×1080** game output. This initial binary bundle was built on Arch Linux; compatible system libraries are required. It does not add support for other GPU architectures or arbitrary resolutions. The native host checks the GPU when loading the network.
+
+## Play
+
+In a game's Steam launch options:
+
+```sh
+~/.local/bin/neuroshade-run --nr %command%
 ```
 
-## User-local installation
+For a 32-bit game launched through Steam/Proton, use:
 
-Build the portable archive reproducibly, extract it, and install without root:
-
-```bash
-cmake --preset release -DNS_WARNINGS_AS_ERRORS=ON
-cmake --build --preset release -j
-cmake --build build/release --target neuroshade-portable
-tar -xzf build/release/packages/NeuroShade-0.1.0-linux-x86_64.tar.gz
-cd NeuroShade-0.1.0-linux-x86_64
-./install.sh
-~/.local/bin/neuroshade doctor --deep
+```sh
+~/.local/bin/neuroshade-run --nr --32 %command%
 ```
 
-`install.sh` verifies `SHA256SUMS` before copying the payload. It installs the
-layer, tools, plugins, models, desktop entry, importer, documentation, and
-qualification scripts below `~/.local`; it does not require root. Remove the
-installed files while preserving profiles/logs with:
+For a native Vulkan game or a Wine command:
 
-```bash
-~/.local/share/neuroshade/packaging/uninstall.sh
+```sh
+~/.local/bin/neuroshade-run --nr /path/to/game
+~/.local/bin/neuroshade-run --nr --32 wine /path/to/game.exe
 ```
 
-Pass `--purge-user-data` only when profiles, caches, and logs should also be
-deleted.
+`--nr` selects the managed DLSSNR profile and starts the native host on demand. Direct executable launches can detect 32/64-bit; use `--32` when a launcher hides the game's executable. The host stays available between launches; use one neural-rendered game at a time.
 
-## Product tools
+Open the overlay with **Home**. Its pipeline controls enable/disable reconstruction; **F8** exposes NR Style, NR Preset, NR Intensity, Automatic Mask and structure/tone controls. **Apply** updates the running model; **Save** persists the profile. See [overlay controls](docs/DLSSNR_OVERLAY.md).
 
-The CLI and the GTK4 desktop frontend remain outside the rendering process.
-When GTK4 development files are unavailable at build time, a Zenity-based
-fallback is installed instead:
+- **NR Style:** Default, Natural and Cinematic conditioning.
+- **NR Intensity:** 0–2; 0 preserves the input, 1 is the normal network result, values above 1 amplify the change.
+- **NR Preset:** the recovered package contains one weight preset. Other selections explicitly fall back to preset 1; they are not separate X2/X3 networks.
 
-```bash
-neuroshade doctor
-neuroshade frontend
-neuroshade game add /path/to/game.exe ~/.config/neuroshade/my-profile.json
-neuroshade profile list
-neuroshade profile show /path/to/game.exe
-neuroshade plugin list
-neuroshade model list
-neuroshade model import model.pth --adapter adapter.py
-neuroshade verify
-neuroshade cache clear
-neuroshade diagnostic export diagnostic.tar.gz
+Omit `--nr` for the standard post-processing profile. To keep separate settings for a game, copy `~/.config/neuroshade/profiles/dlssnr.json` and select it with `NEUROSHADE_PROFILE`. Custom native profiles must also supply their model's running host through `NEUROSHADE_RUNTIME_SOCKET`; the automatic host lifecycle is for the managed profile.
+
+Flatpak launchers need the layer, installation and environment exposed inside their sandbox. Games with anti-cheat may disallow injected layers. “Compatible games” does not mean every game or every launcher works without configuration; see [compatibility](COMPATIBILITY.md).
+
+## What is included
+
+The native DLSSNR path uses a 64-bit C++/HIP host, resident GPU weights and activations, reusable HIP Graphs and Vulkan/HIP shared buffers. It coexists with the existing PyTorch, ONNX and MIGraphX integrations; those optional backends have their own dependencies.
+
+The current network consumes final color. External motion/depth input and visual/performance parity with the NVIDIA add-on are not established. Historical measurements and implementation limits are documented in [native runtime](docs/DLSSNR_NATIVE.md), [GPU transport](docs/DLSSNR_GPU_TRANSPORT.md) and [parity gaps](docs/DLSSNR_PARITY_GAPS.md).
+
+## Troubleshooting and development
+
+```sh
+~/.local/bin/neuroshade doctor
+~/.local/bin/neuroshade setup
 ```
 
-Use `neuroshade launch <command...>` or the Steam launch option
-`neuroshade-run %command%`. Registered profiles are recovered automatically by
-exact executable identity. Session logs are written under
-`$XDG_STATE_HOME/neuroshade` (normally `~/.local/state/neuroshade`).
+Session logs are under `${XDG_STATE_HOME:-~/.local/state}/neuroshade`. Native host startup logs are under `${XDG_RUNTIME_DIR}/neuroshade-native/host.log` (or the NeuroShade state directory when XDG_RUNTIME_DIR is absent). Set `NEUROSHADE_DIAGNOSTICS=1` for additional launch diagnostics. Normal launches skip expensive GPU diagnostic utilities.
 
-Direct3D 9 and 11 games/applications use DXVK; Direct3D 12 uses VKD3D-Proton.
-Enable DXVK in the Proton/Wine/Bottles environment, then use the same
-`neuroshade-run` launcher and shader profiles. D3D9 requires DXVK's `d3d9.dll`
-and a native DLL override; WineD3D's OpenGL path does not reach this Vulkan
-layer. See [Proton qualification](tests/proton/README.md) for the D3D9 fixture
-and [compatibility](COMPATIBILITY.md) for tested architectures and limits.
+[Build and developer reference](docs/DEVELOPMENT.md) · [Specification](SPEC.md) · [Compatibility](COMPATIBILITY.md) · [Releases](https://github.com/wanbnn/neuroshade/releases)
 
-Run the M9 reliability gates sequentially (the safe default) with:
-
-```bash
-sh ~/.local/share/neuroshade/qualification/run-m9-soaks.sh \
-  ~/.local ~/.local/state/neuroshade/qualification 1800
-```
-
-Soaks share a GPU qualification lock, while Proton qualification requires it
-exclusively. This prevents games, shader compilation, and native/HIP stress
-loops from being launched together. Parallel soaks require the explicit
-`NEUROSHADE_SOAK_PARALLEL=1` opt-in and are not recommended on a desktop GPU.
-
-HIP/native plugins are trusted code and require `--trust-unsafe` during manual
-installation. User packages and bundled plugin assets have SHA-256 inventories;
-`neuroshade verify` reports modifications. See [COMPATIBILITY.md](COMPATIBILITY.md)
-before using the layer with anti-cheat protected software.
-
-The deterministic Vulkan test can also be run directly:
-
-```bash
-./build/debug/bin/ns-testbed --frames 4
-```
-
-By default it prefers a discrete AMD GPU. Select a device by name substring when needed:
-
-```bash
-NEUROSHADE_VULKAN_DEVICE='RX 9060 XT' ./build/debug/bin/ns-testbed
-```
-
-Run any Vulkan application through the explicit layer without installing it:
-
-```bash
-NEUROSHADE_ROOT="$PWD/build/debug" ./build/debug/bin/neuroshade-run <command> [arguments...]
-```
-
-Only the child process receives `VK_LAYER_NEUROSHADE`; launching the command normally disables NeuroShade without reinstalling anything.
-
-The Layer processes intercepted swapchain presentation for shader profiles. On
-neural-ready builds it also executes the fixed 64×64 bundled spatial and
-temporal reference models through MIGraphX using an explicitly reported,
-preallocated `HOST-STAGING-FALLBACK` presentation adapter. Incompatible model
-shapes or missing artifacts fail safely to pass-through. Press Home to toggle
-the Vulkan overlay; X11/XWayland uses a checked XCB global hotkey.
-
-Exercise the M2 shader FrameGraph in the canonical testbed:
-
-```bash
-NEUROSHADE_TEST_EFFECTS=sharpen,color_adjust ./build/debug/bin/ns-testbed --frames 4
-NEUROSHADE_PROFILE=tests/data/m2-profile.json ./build/debug/bin/ns-testbed --frames 4
-```
-
-Shader sources are compiled to SPIR-V before execution. Plugin manifests and pipeline profiles are parsed and validated before GPU resources are created.
-
-Exercise the M4 Vulkan/HIP startup self-test and color pass:
-
-```bash
-NEUROSHADE_VULKAN_DEVICE='RX 9060 XT' ./build/debug/bin/ns-interop-test
-NEUROSHADE_FORCE_HOST_STAGING=1 ./build/debug/bin/ns-interop-test
-```
-
-The first command uses opaque-fd external memory and keeps frame data GPU-resident. The second forces the pinned host-staging compatibility path and reports its measured test cost. Both paths use resources preallocated before the color pass. Set `NS_BUILD_HIP_INTEROP=OFF` on machines without ROCm; the hosted Vulkan CI does this explicitly.
-
-Exercise the bundled M5 spatial model through native C++ MIGraphX:
-
-```bash
-./build/debug/bin/ns-neural-test \
-  ./build/debug/share/neuroshade/models/spatial_gain.nsmodel
-```
-
-The model is compiled for the active GPU, warmed twice, and cached below `~/.cache/neuroshade/models/<model-hash>/<gfx>/<migraphx-version>/`. Tensor allocations persist for the runtime lifetime. Python is used only by build tooling to emit the bundled ONNX file and is never launched by `ns-neural-test` or the inference runtime.
-
-Exercise the M8 true 2x temporal-SR model:
-
-```bash
-./build/debug/bin/ns-temporal-sr-test \
-  ./build/debug/share/neuroshade/models/temporal_sr_2x.nsmodel
-```
-
-The qualification harness checks the compiled 32×32→64×64 tensor dimensions,
-every output value for two temporal frames, motion propagation, and the
-model-declared spatial fallback when motion is unavailable. The corresponding
-schema-v2 profile is `src/profile/examples/temporal_sr_2x.json`.
-
-The M0 testbed renders exact integer RGBA frames into an offscreen Vulkan image, reads the test result back only for verification, checks every pixel, and emits a sequence checksum. This readback is test-only and is not the production rendering path described by DEC-003/DEC-004.
-
-## Status
-
-- M0 repository, deterministic testbed, logging, build, and CI: complete
-- M1 explicit Vulkan layer, pass-through, swapchain tracking, and launcher: complete
-- M2 semantic FrameGraph, SPIR-V shader pipeline, manifests, and profiles: complete
-- M3 resource tracking, candidate analysis, previews, bindings, and fingerprints: complete
-- M4 Vulkan/HIP buffer interop, canonical ABI, self-test, fallback, and HIP kernel: complete
-- M5 `.nsmodel`, native MIGraphX spatial inference, persistent tensor plan, warm-up/cache, and failure fallback: complete
-- M6 temporal history ring, invalidation, profiling, and temporal inference: complete
-- M7 isolated `.pth` importer, adapters, verification, and preflight: complete
-- M8 motion/low-resolution binding path and true 2x temporal super-resolution: complete
-- M9 present processing, Vulkan overlay/Home, product tooling, safe Proton DX11/DX12 qualification, and reproducible packaging: complete
+The NeuroShade source code is MIT licensed. The recovered model artifacts have separate provenance recorded in their metadata; the source-code license does not relicense those artifacts.
